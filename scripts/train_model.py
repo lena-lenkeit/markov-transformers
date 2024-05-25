@@ -1,5 +1,9 @@
+import json
+from typing import Any, Dict
+
 import matplotlib.pyplot as plt
 import numpy as np
+import safetensors.torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -74,6 +78,9 @@ def messn_matrices(x: float = 0.05, alpha: float = 0.85, n: int = 3):
 
 
 def main():
+    # TODO: Resolve the non-linear output issue somehow (linear interpolation over
+    # logits != linear interpolation over probabilites)
+
     # Parameters
     device = "cuda"
     batch_size = 128
@@ -82,11 +89,31 @@ def main():
     num_states = 3
     num_outputs = num_states
     hmm_temperature = 1.0
-    seq_len = 64
+    seq_len = 256
+
+    transformer_kwargs: Dict[str, Any] = dict(
+        l2norm_embed=True,
+    )
+    decoder_kwargs: Dict[str, Any] = dict(
+        dim=128,
+        depth=1,
+        heads=2,
+        use_simple_rmsnorm=True,
+        ff_glu=True,
+        rotary_pos_emb=True,
+    )
 
     # Derived parameters
     num_tokens = num_outputs + 1  # HMM output tokens + BOS token
     bos_token_id = num_tokens - 1
+
+    # Update kwargs
+    transformer_kwargs.update(
+        dict(
+            num_tokens=num_tokens,
+            max_seq_len=seq_len,
+        )
+    )
 
     # Initialize HMM
     rng = np.random.default_rng(1)
@@ -101,19 +128,10 @@ def main():
 
     # Initialize model and optimizer
     model = TransformerWrapper(
-        num_tokens=num_tokens,
-        max_seq_len=seq_len,
-        l2norm_embed=True,
-        attn_layers=Decoder(
-            dim=128,
-            depth=1,
-            heads=2,
-            use_simple_rmsnorm=True,
-            ff_glu=True,
-            rotary_pos_emb=True,
-        ),
+        **transformer_kwargs,
+        attn_layers=Decoder(**decoder_kwargs),
     ).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0)
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
 
     # Training
     pbar = trange(512)
@@ -140,10 +158,18 @@ def main():
 
         pbar.set_postfix_str(f"Loss: {loss:.2e}")
 
+    # Save model
+    config_dict = {"transformer": transformer_kwargs, "decoder": decoder_kwargs}
+    safetensors.torch.save_model(
+        model, "model.safetensors", metadata={"config": json.dumps(config_dict)}
+    )
+    with open("config.json", mode="w") as f:
+        json.dump(config_dict, f, indent=4)
+
     # Sample hidden states
     with torch.no_grad():
         states, outputs = sample_hmm(hmm, seq_len, eval_batch_size, rng)
-        # states = torch.from_numpy(states).to(device)
+        states = torch.from_numpy(states).to(device)
         outputs = torch.from_numpy(outputs).to(device)
 
         tokens = outputs.clone()
@@ -158,11 +184,23 @@ def main():
             rearrange(targets, "batch sequence -> (batch sequence)"),
         )
 
-        embeddings = embeddings.cpu().numpy()
-
         print(f"Eval Loss: {loss:.2e}")
 
+    # Save eval data
+    safetensors.torch.save_file(
+        {
+            "states": states,
+            "outputs": outputs,
+            "logits": logits,
+            "embeddings": embeddings,
+        },
+        "eval.safetensors",
+    )
+
     # Perform PCA
+    embeddings = embeddings.cpu().numpy()
+    states = states.cpu().numpy()
+
     pca = PCA(n_components=16, whiten=False)
     embeddings_2d = pca.fit_transform(
         rearrange(embeddings, "batch sequence features -> (batch sequence) features")
