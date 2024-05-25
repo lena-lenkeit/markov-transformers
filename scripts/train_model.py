@@ -32,6 +32,47 @@ def sample_hmm(
     return states, outputs
 
 
+# https://arxiv.org/abs/1702.08565
+def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
+    transition_matrix = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                transition_matrix[i, j] = 1 - 2 * x
+            else:
+                transition_matrix[i, j] = x
+
+    emission_matrix = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                emission_matrix[i, j] = alpha
+            else:
+                emission_matrix[i, j] = (1 - alpha) / 2
+
+    return transition_matrix, emission_matrix
+
+
+def messn_matrices(x: float = 0.05, alpha: float = 0.85, n: int = 3):
+    transition_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                transition_matrix[i, j] = 1 - (n - 1) * x
+            else:
+                transition_matrix[i, j] = x
+
+    emission_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                emission_matrix[i, j] = alpha
+            else:
+                emission_matrix[i, j] = (1 - alpha) / (n - 1)
+
+    return transition_matrix, emission_matrix
+
+
 def main():
     # Parameters
     device = "cuda"
@@ -39,7 +80,7 @@ def main():
     eval_batch_size = 1024
 
     num_states = 3
-    num_outputs = 3
+    num_outputs = num_states
     hmm_temperature = 1.0
     seq_len = 64
 
@@ -49,12 +90,14 @@ def main():
 
     # Initialize HMM
     rng = np.random.default_rng(1)
-    hmm = HiddenMarkovModel(
-        sample_matrix(num_states, temperature=hmm_temperature, rng=rng),
-        sample_matrix(
-            num_states, num_outputs=num_outputs, temperature=hmm_temperature, rng=rng
-        ),
-    )
+    # hmm = HiddenMarkovModel(
+    #    sample_matrix(num_states, temperature=hmm_temperature, rng=rng),
+    #    sample_matrix(
+    #        num_states, num_outputs=num_outputs, temperature=hmm_temperature, rng=rng
+    #    ),
+    # )
+
+    hmm = HiddenMarkovModel(*messn_matrices(n=num_states))
 
     # Initialize model and optimizer
     model = TransformerWrapper(
@@ -63,17 +106,17 @@ def main():
         l2norm_embed=True,
         attn_layers=Decoder(
             dim=128,
-            depth=2,
+            depth=1,
             heads=2,
             use_simple_rmsnorm=True,
             ff_glu=True,
             rotary_pos_emb=True,
         ),
     ).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0)
 
     # Training
-    pbar = trange(128)
+    pbar = trange(512)
     for i in pbar:
         states, outputs = sample_hmm(hmm, seq_len, batch_size, rng)
         states = torch.from_numpy(states).to(device)
