@@ -103,9 +103,8 @@ def hmm_from_observations(
         # Get initial state
         belief_state = repeat(prior, "states -> batch states", batch=dim_batch)
         probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
-        logits = torch.logit(probs)
 
-        all_logits = [logits]
+        seq_probs = [probs]
         for j in range(dim_sequence - 1):
             tokens = observations[:, j]
 
@@ -113,12 +112,14 @@ def hmm_from_observations(
             belief_state = propagate_posterior(belief_state, transition_matrix)
 
             probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
-            logits = torch.logit(probs)
-            all_logits.append(logits)
+            seq_probs.append(probs)
 
-        all_logits = torch.stack(all_logits, dim=1)
-        loss = F.cross_entropy(
-            rearrange(all_logits, "batch sequence logits -> (batch sequence) logits"),
+        seq_probs = torch.stack(seq_probs, dim=1)
+        seq_log_probs = torch.log(seq_probs)
+        loss = F.nll_loss(
+            rearrange(
+                seq_log_probs, "batch sequence logits -> (batch sequence) logits"
+            ),
             rearrange(observations, "batch sequence -> (batch sequence)"),
         )
 
