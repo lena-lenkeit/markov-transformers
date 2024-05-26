@@ -55,7 +55,9 @@ seq_len = 256
 init_state = rng.integers(hmm.num_states, size=num_samples)
 init_observation = hmm.sample_output(init_state, rng)
 
-# TODO: Prior from stationary distribution of HMM
+# TODO: Prior from stationary distribution of HMM (Eigenvector of the HMM transition
+# matrix with eigenvalue 1)
+# print(np.linalg.eig(hmm.transition_matrix))
 prior = np.full((num_samples, hmm.num_states), 1 / hmm.num_states)
 
 states = [init_state]
