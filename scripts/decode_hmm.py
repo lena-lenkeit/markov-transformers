@@ -71,7 +71,64 @@ def hmm_from_belief_states(
 
     dim_batch, dim_sequence, dim_state = belief_states.shape
 
-    # TODO: Like hmm_from_observations, but with the belief state supplied externally
+    transition_logit_matrix = torch.empty((dim_state, dim_state), requires_grad=True)
+    emission_logit_matrix = torch.empty(
+        (dim_state, dim_observations), requires_grad=True
+    )
+
+    with torch.no_grad():
+        transition_logit_matrix.data.normal_(std=1e-1)
+        emission_logit_matrix.data.normal_(std=1e-1)
+
+    optimizer = optim.AdamW(
+        [transition_logit_matrix, emission_logit_matrix], lr=1e-1, weight_decay=0.0
+    )
+
+    pbar = trange(256)
+    for i in pbar:
+        transition_matrix = F.softmax(transition_logit_matrix, dim=1)
+        emission_matrix = F.softmax(emission_logit_matrix, dim=1)
+
+        current_probs = einsum(belief_states, emission_matrix, "... i, i j -> ... j")
+        current_log_probs = torch.log(current_probs)
+
+        next_belief_states = get_posterior(belief_states, observations, emission_matrix)
+        next_belief_states = propagate_posterior(next_belief_states, transition_matrix)
+
+        next_probs = einsum(next_belief_states, emission_matrix, "... i, i j -> ... j")
+        next_log_probs = torch.log(next_probs)
+
+        loss = (
+            F.nll_loss(
+                rearrange(
+                    current_log_probs,
+                    "batch sequence logits -> (batch sequence) logits",
+                ),
+                rearrange(observations, "batch sequence -> (batch sequence)"),
+            )
+            * 0.5
+            + F.nll_loss(
+                rearrange(
+                    next_log_probs[:, :-1],
+                    "batch sequence logits -> (batch sequence) logits",
+                ),
+                rearrange(observations[:, 1:], "batch sequence -> (batch sequence)"),
+            )
+            * 0.5
+        )
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        pbar.set_postfix_str(f"Loss: {loss:.2e}")
+
+    with torch.no_grad():
+        transition_matrix = F.softmax(transition_logit_matrix, dim=1)
+        emission_matrix = F.softmax(emission_logit_matrix, dim=1)
+        prior = get_prior(transition_matrix)
+
+    return transition_matrix, emission_matrix, prior
 
 
 def hmm_from_observations(
@@ -184,13 +241,72 @@ def plot_pca():
     plt.show()
 
 
+def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
+    transition_matrix = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                transition_matrix[i, j] = 1 - 2 * x
+            else:
+                transition_matrix[i, j] = x
+
+    emission_matrix = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                emission_matrix[i, j] = alpha
+            else:
+                emission_matrix[i, j] = (1 - alpha) / 2
+
+    return transition_matrix, emission_matrix
+
+
 def main():
     # observations = torch.randint(3, size=(128, 256))
-    eval_data = safetensors.torch.load_file("data/eval.safetensors")
-    observations = eval_data["outputs"]
 
-    transition_matrix, emission_matrix, prior = hmm_from_observations(
-        observations, dim_state=3, dim_observations=3
+    # eval_data = safetensors.torch.load_file("data/eval.safetensors")
+    # observations = eval_data["outputs"]
+
+    # transition_matrix, emission_matrix, prior = hmm_from_observations(
+    #    observations, dim_state=3, dim_observations=3
+    # )
+    # print(transition_matrix, emission_matrix, prior)
+
+    hmm = HiddenMarkovModel(*mess3_matrices())
+
+    rng = np.random.default_rng(1234)
+    num_samples = 1024 * 1
+    seq_len = 256
+
+    init_state = rng.integers(hmm.num_states, size=num_samples)
+    init_observation = hmm.sample_output(init_state, rng)
+
+    prior = get_prior(torch.from_numpy(hmm.transition_matrix))
+    prior = repeat(prior, "states -> batch states", batch=num_samples)
+
+    states = [init_state]
+    outputs = [init_observation]
+    beliefs = [prior]
+
+    for i in range(seq_len):
+        prior = beliefs[-1]
+        posterior = get_posterior(
+            prior, torch.from_numpy(outputs[-1]), torch.from_numpy(hmm.output_matrix)
+        )
+        posterior = propagate_posterior(
+            posterior, torch.from_numpy(hmm.transition_matrix)
+        )
+        beliefs.append(posterior)
+
+        states.append(hmm.next_state(states[-1], rng))
+        outputs.append(hmm.sample_output(states[-1], rng))
+
+    states = np.stack(states, axis=1)  # (batch, sequence)
+    outputs = np.stack(outputs, axis=1)  # (batch, sequence)
+    beliefs = torch.stack(beliefs, dim=1)  # (batch, sequence, states)
+
+    transition_matrix, emission_matrix, prior = hmm_from_belief_states(
+        beliefs.float(), torch.from_numpy(outputs), dim_observations=3
     )
     print(transition_matrix, emission_matrix, prior)
 
