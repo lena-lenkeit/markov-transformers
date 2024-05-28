@@ -65,6 +65,7 @@ def hmm_from_residuals(
     observations: Int[torch.Tensor, "batch sequence"],
     dim_state: int,
     dim_observations: int,
+    num_train_steps: int = 1024,
 ):
     """Attempts to decode the full HMM (transition and emission matrix) given sequences
     of belief states and observations by assuming the belief states
@@ -94,7 +95,7 @@ def hmm_from_residuals(
         weight_decay=0.0,
     )
 
-    pbar = trange(1024)
+    pbar = trange(num_train_steps)
     for i in pbar:
         transition_matrix = F.softmax(transition_logit_matrix, dim=1)
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
@@ -144,7 +145,7 @@ def hmm_from_residuals(
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
         prior = get_prior(transition_matrix)
 
-    return transition_matrix, emission_matrix, prior
+    return transition_matrix, emission_matrix, prior, residual_belief_mapping
 
 
 def hmm_from_belief_states(
@@ -348,8 +349,18 @@ def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
     return transition_matrix, emission_matrix
 
 
+@torch.no_grad()
+def inverse_linear(
+    y: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    x = y - bias
+    x = np.linalg.lstsq(weight.numpy(), x.numpy().T)[0].T
+
+    return torch.from_numpy(x)
+
+
 def main():
-    # observations = torch.randint(3, size=(128, 256))
+    # observations = torch.randint(3, size=(1024 * 16, 16))
 
     # eval_data = safetensors.torch.load_file("data/eval.safetensors")
     # observations = eval_data["outputs"]
@@ -399,14 +410,80 @@ def main():
     print(transition_matrix, emission_matrix, prior)
     """
 
+    # """
     eval_data = safetensors.torch.load_file("data/eval.safetensors")
-    transition_matrix, emission_matrix, prior = hmm_from_residuals(
-        eval_data["embeddings"],
-        eval_data["outputs"],
-        dim_state=3,
-        dim_observations=3,
+    transition_matrix, emission_matrix, prior, residual_belief_mapping = (
+        hmm_from_residuals(
+            eval_data["embeddings"],
+            eval_data["outputs"],
+            dim_state=3,
+            dim_observations=3,
+            num_train_steps=1024,
+        )
     )
     print(transition_matrix, emission_matrix, prior)
+
+    with torch.no_grad():
+        belief_states = residual_belief_mapping(eval_data["embeddings"])
+        min_belief = torch.min(belief_states, dim=-1, keepdim=True).values
+        belief_states = belief_states - min_belief.clamp(max=0.0)
+        belief_states = belief_states / torch.sum(belief_states, dim=-1, keepdim=True)
+
+        with open("data/config.json", mode="r") as f:
+            config_dict = json.load(f)
+
+        model = TransformerWrapper(
+            **config_dict["transformer"],
+            attn_layers=Decoder(**config_dict["decoder"]),
+        )
+
+        missing, unexpected = safetensors.torch.load_model(
+            model, "data/model.safetensors"
+        )
+        print(missing, unexpected)
+
+        residuals = inverse_linear(
+            torch.eye(3),
+            residual_belief_mapping.weight,
+            residual_belief_mapping.bias,
+        )
+        em = model.to_logits(residuals)
+
+        min_em = torch.min(em, dim=-1, keepdim=True).values
+        em = em - min_em.clamp(max=0.0)
+        em = em / torch.sum(em, dim=-1, keepdim=True)
+        print("EM: ", em)
+        print("EM->P", residual_belief_mapping(residuals))
+
+        p = belief_states.numpy()
+
+        plt.figure()
+        plt.scatter(p[..., 0].flatten(), p[..., 1].flatten(), s=1.0)
+        plt.show()
+
+        plt.figure()
+        plt.scatter(p[..., 0].flatten(), p[..., 2].flatten(), s=1.0)
+        plt.show()
+
+        plt.figure()
+        plt.scatter(p[..., 1].flatten(), p[..., 2].flatten(), s=1.0)
+        plt.show()
+
+        embeddings = eval_data["embeddings"]
+        embeddings = rearrange(
+            embeddings, "batch sequence features -> (batch sequence) features"
+        )
+        embeddings = embeddings - torch.mean(embeddings, dim=0, keepdim=True)
+
+        u, s, v = torch.svd(embeddings)
+        residual_components = v[:, :2]
+        reduced = embeddings @ residual_components
+
+        plt.figure()
+        plt.scatter(*reduced.T, s=1.0)
+        plt.show()
+
+    # """
 
 
 if __name__ == "__main__":
