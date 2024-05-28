@@ -10,54 +10,20 @@ import torch.nn.functional as F
 import torch.optim as optim
 from einops import einsum, rearrange, repeat
 from jaxtyping import Float, Int
-from markov import HiddenMarkovModel, sample_matrix
 from sklearn.decomposition import PCA
 from tqdm.auto import trange
 from x_transformers import Decoder, TransformerWrapper
 
+from markov import mess3_matrices
+from markov.predict.torch import (
+    get_stationary_distribution,
+    propagate_values,
+    update_posterior,
+)
+
 
 def l2_normalize(x: torch.Tensor, dim: int, keepdim: bool):
     return x / torch.linalg.vector_norm(x, ord=2, dim=dim, keepdim=keepdim)
-
-
-def get_posterior(
-    prior: Float[torch.Tensor, "... state"],
-    observation: Int[torch.Tensor, "..."],
-    emission_matrix: Float[torch.Tensor, "state emission"],
-) -> Float[torch.Tensor, "... state"]:
-    # Bayes' Theorem: p(Hi|Oj) = p(Oj|Hi)p(Hi)/p(Oj)
-    # p(Oj|Hi) is the emission matrix
-
-    likelihood = emission_matrix[:, observation]
-    posterior = einsum(likelihood, prior, "i ..., ... i -> ... i")
-    posterior = posterior / torch.sum(posterior, dim=-1, keepdim=True)
-    return posterior
-
-
-def propagate_posterior(
-    p: Float[torch.Tensor, "..."],
-    transition_matrix: Float[torch.Tensor, "state next_state"],
-) -> Float[torch.Tensor, "..."]:
-    p = einsum(p, transition_matrix, "... i, i j -> ... j")
-    # Not necessary, but might avoid accumulation errors
-    p = p / torch.sum(p, dim=-1, keepdim=True)
-
-    return p
-
-
-def get_prior(transition_matrix: Float[torch.Tensor, "state next_state"]):
-    values, vectors = torch.linalg.eig(transition_matrix)
-
-    values = torch.real(values)
-    vectors = torch.real(vectors)
-
-    one_distance = torch.abs(1 - values)
-    one_index = torch.argmin(one_distance)
-    one_vector = vectors[:, one_index]
-
-    prior = one_vector / torch.sum(one_vector)
-
-    return prior
 
 
 def hmm_from_residuals(
@@ -109,8 +75,12 @@ def hmm_from_residuals(
         current_probs = einsum(belief_states, emission_matrix, "... i, i j -> ... j")
         current_log_probs = torch.log(current_probs)
 
-        next_belief_states = get_posterior(belief_states, observations, emission_matrix)
-        next_belief_states = propagate_posterior(next_belief_states, transition_matrix)
+        next_belief_states = update_posterior(
+            belief_states, observations, emission_matrix
+        )
+        next_belief_states = propagate_values(
+            next_belief_states, transition_matrix, normalize=True
+        )
 
         next_probs = einsum(next_belief_states, emission_matrix, "... i, i j -> ... j")
         next_log_probs = torch.log(next_probs)
@@ -143,7 +113,7 @@ def hmm_from_residuals(
     with torch.no_grad():
         transition_matrix = F.softmax(transition_logit_matrix, dim=1)
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
-        prior = get_prior(transition_matrix)
+        prior = get_stationary_distribution(transition_matrix)
 
     return transition_matrix, emission_matrix, prior, residual_belief_mapping
 
@@ -180,8 +150,12 @@ def hmm_from_belief_states(
         current_probs = einsum(belief_states, emission_matrix, "... i, i j -> ... j")
         current_log_probs = torch.log(current_probs)
 
-        next_belief_states = get_posterior(belief_states, observations, emission_matrix)
-        next_belief_states = propagate_posterior(next_belief_states, transition_matrix)
+        next_belief_states = update_posterior(
+            belief_states, observations, emission_matrix
+        )
+        next_belief_states = propagate_values(
+            next_belief_states, transition_matrix, normalize=True
+        )
 
         next_probs = einsum(next_belief_states, emission_matrix, "... i, i j -> ... j")
         next_log_probs = torch.log(next_probs)
@@ -214,7 +188,7 @@ def hmm_from_belief_states(
     with torch.no_grad():
         transition_matrix = F.softmax(transition_logit_matrix, dim=1)
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
-        prior = get_prior(transition_matrix)
+        prior = get_stationary_distribution(transition_matrix)
 
     return transition_matrix, emission_matrix, prior
 
@@ -243,7 +217,7 @@ def hmm_from_observations(
     for i in pbar:
         transition_matrix = F.softmax(transition_logit_matrix, dim=1)
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
-        prior = get_prior(transition_matrix)
+        prior = get_stationary_distribution(transition_matrix)
 
         # Get initial state
         belief_state = repeat(prior, "states -> batch states", batch=dim_batch)
@@ -253,8 +227,10 @@ def hmm_from_observations(
         for j in range(dim_sequence - 1):
             tokens = observations[:, j]
 
-            belief_state = get_posterior(belief_state, tokens, emission_matrix)
-            belief_state = propagate_posterior(belief_state, transition_matrix)
+            belief_state = update_posterior(belief_state, tokens, emission_matrix)
+            belief_state = propagate_values(
+                belief_state, transition_matrix, normalize=True
+            )
 
             probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
             seq_probs.append(probs)
@@ -277,7 +253,7 @@ def hmm_from_observations(
     with torch.no_grad():
         transition_matrix = F.softmax(transition_logit_matrix, dim=1)
         emission_matrix = F.softmax(emission_logit_matrix, dim=1)
-        prior = get_prior(transition_matrix)
+        prior = get_stationary_distribution(transition_matrix)
 
     return transition_matrix, emission_matrix, prior
 
@@ -327,26 +303,6 @@ def plot_pca():
     plt.figure()
     plt.scatter(*reduced.T, s=1.0)
     plt.show()
-
-
-def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
-    transition_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                transition_matrix[i, j] = 1 - 2 * x
-            else:
-                transition_matrix[i, j] = x
-
-    emission_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                emission_matrix[i, j] = alpha
-            else:
-                emission_matrix[i, j] = (1 - alpha) / 2
-
-    return transition_matrix, emission_matrix
 
 
 @torch.no_grad()

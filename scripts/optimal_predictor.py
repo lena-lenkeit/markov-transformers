@@ -1,50 +1,13 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from einops import einsum
-from markov import HiddenMarkovModel
+from einops import repeat
 
-
-def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
-    transition_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                transition_matrix[i, j] = 1 - 2 * x
-            else:
-                transition_matrix[i, j] = x
-
-    emission_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                emission_matrix[i, j] = alpha
-            else:
-                emission_matrix[i, j] = (1 - alpha) / 2
-
-    return transition_matrix, emission_matrix
-
-
-def get_posterior(
-    prior: np.ndarray,
-    observation: np.ndarray,
-    emission_matrix: np.ndarray,
-) -> np.ndarray:
-    # Bayes' Theorem: p(Hi|Oj) = p(Oj|Hi)p(Hi)/p(Oj)
-    # p(Oj|Hi) is the emission matrix
-
-    likelihood = emission_matrix[:, observation]
-    posterior = einsum(likelihood, prior, "i ..., ... i -> ... i")
-    posterior = posterior / np.sum(posterior, axis=-1, keepdims=True)
-    return posterior
-
-
-def propagate_posterior(p: np.ndarray, transition_matrix: np.ndarray):
-    p = einsum(p, transition_matrix, "... i, i j -> ... j")
-    # Not necessary, but might avoid accumulation errors
-    p = p / np.sum(p, axis=-1, keepdims=True)
-
-    return p
-
+from markov import HiddenMarkovModel, mess3_matrices
+from markov.predict.numpy import (
+    get_stationary_distribution,
+    propagate_values,
+    update_posterior,
+)
 
 hmm = HiddenMarkovModel(*mess3_matrices())
 
@@ -55,10 +18,8 @@ seq_len = 256
 init_state = rng.integers(hmm.num_states, size=num_samples)
 init_observation = hmm.sample_output(init_state, rng)
 
-# TODO: Prior from stationary distribution of HMM (Eigenvector of the HMM transition
-# matrix with eigenvalue 1)
-# print(np.linalg.eig(hmm.transition_matrix))
-prior = np.full((num_samples, hmm.num_states), 1 / hmm.num_states)
+prior = get_stationary_distribution(hmm.transition_matrix)
+prior = repeat(prior, "state -> batch state", batch=num_samples)
 
 states = [init_state]
 outputs = [init_observation]
@@ -66,8 +27,8 @@ beliefs = [prior]
 
 for i in range(seq_len):
     prior = beliefs[-1]
-    posterior = get_posterior(prior, outputs[-1], hmm.output_matrix)
-    posterior = propagate_posterior(posterior, hmm.transition_matrix)
+    posterior = update_posterior(prior, outputs[-1], hmm.output_matrix)
+    posterior = propagate_values(posterior, hmm.transition_matrix, normalize=True)
     beliefs.append(posterior)
 
     states.append(hmm.next_state(states[-1], rng))

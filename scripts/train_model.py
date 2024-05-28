@@ -10,72 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from einops import rearrange
-from markov import HiddenMarkovModel, sample_matrix
 from sklearn.decomposition import PCA
 from tqdm.auto import trange
 from x_transformers import Decoder, TransformerWrapper
 
-
-def sample_hmm(
-    hmm: HiddenMarkovModel, seq_len: int, batch_size: int, rng: np.random.Generator
-):
-    state = rng.integers(hmm.num_states, size=batch_size)
-    output = hmm.sample_output(state, rng)
-
-    states = [state]
-    outputs = [output]
-    for i in range(seq_len - 1):
-        state = hmm.next_state(state, rng)
-        output = hmm.sample_output(state, rng)
-
-        states.append(state)
-        outputs.append(output)
-
-    states = np.stack(states, axis=1)
-    outputs = np.stack(outputs, axis=1)
-
-    return states, outputs
-
-
-# https://arxiv.org/abs/1702.08565
-def mess3_matrices(x: float = 0.05, alpha: float = 0.85):
-    transition_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                transition_matrix[i, j] = 1 - 2 * x
-            else:
-                transition_matrix[i, j] = x
-
-    emission_matrix = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            if i == j:
-                emission_matrix[i, j] = alpha
-            else:
-                emission_matrix[i, j] = (1 - alpha) / 2
-
-    return transition_matrix, emission_matrix
-
-
-def messn_matrices(x: float = 0.05, alpha: float = 0.85, n: int = 3):
-    transition_matrix = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                transition_matrix[i, j] = 1 - (n - 1) * x
-            else:
-                transition_matrix[i, j] = x
-
-    emission_matrix = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                emission_matrix[i, j] = alpha
-            else:
-                emission_matrix[i, j] = (1 - alpha) / (n - 1)
-
-    return transition_matrix, emission_matrix
+from markov import HiddenMarkovModel, messn_matrices, sample_hmm
 
 
 def main():
