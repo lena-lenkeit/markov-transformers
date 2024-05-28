@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt
@@ -81,6 +82,9 @@ def main():
     # TODO: Resolve the non-linear output issue somehow (linear interpolation over
     # logits != linear interpolation over probabilites)
 
+    # Paths
+    save_dir = "data"
+
     # Parameters
     device = "cuda"
     batch_size = 128
@@ -161,9 +165,11 @@ def main():
     # Save model
     config_dict = {"transformer": transformer_kwargs, "decoder": decoder_kwargs}
     safetensors.torch.save_model(
-        model, "model.safetensors", metadata={"config": json.dumps(config_dict)}
+        model,
+        os.path.join(save_dir, "model.safetensors"),
+        metadata={"config": json.dumps(config_dict)},
     )
-    with open("config.json", mode="w") as f:
+    with open(os.path.join(save_dir, "config.json"), mode="w") as f:
         json.dump(config_dict, f, indent=4)
 
     # Sample hidden states
@@ -194,7 +200,7 @@ def main():
             "logits": logits,
             "embeddings": embeddings,
         },
-        "eval.safetensors",
+        os.path.join(save_dir, "eval.safetensors"),
     )
 
     # Perform PCA
