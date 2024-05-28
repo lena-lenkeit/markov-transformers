@@ -156,6 +156,20 @@ def main():
             rearrange(targets, "batch sequence -> (batch sequence)"),
         )
 
+        """
+        probs = logits
+        min_probs = torch.min(probs, dim=-1, keepdim=True).values
+        probs = 1e-2 + probs - min_probs.clamp(max=0.0)
+        probs = probs / torch.sum(probs, dim=-1, keepdim=True)
+        print(probs)
+        log_probs = torch.log(probs)
+
+        loss = F.nll_loss(
+            rearrange(log_probs, "batch sequence logits -> (batch sequence) logits"),
+            rearrange(targets, "batch sequence -> (batch sequence)"),
+        )
+        """
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
