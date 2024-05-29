@@ -127,3 +127,23 @@ def messn_matrices(x: float = 0.05, alpha: float = 0.85, n: int = 3):
                 emission_matrix[i, j] = (1 - alpha) / (n - 1)
 
     return transition_matrix, emission_matrix
+
+
+def circle_matrices(x: float = 0.05, alpha: float = 0.85, n: int = 3):
+    transition_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == ((j - 1) % n):
+                transition_matrix[i, j] = 1 - (n - 1) * x
+            else:
+                transition_matrix[i, j] = x
+
+    emission_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                emission_matrix[i, j] = alpha
+            else:
+                emission_matrix[i, j] = (1 - alpha) / (n - 1)
+
+    return transition_matrix, emission_matrix
