@@ -49,4 +49,144 @@ I'll also use as a basis to develop my first attempt:
     Can attention layers implement state space models?
 
 Testing is necessary...
+
+* Observations:
+* - Attention scores for the 1-layer 1-head attn-only HMM-transformer attend weakly to
+    the current token, most strongly to the previous token, and decay quickly after a
+    few tokens
+*   - This is only the case for mess3 (due to symmetry, or strongly bimodal probs?)! On
+      a random 3-state, 3-output (also 16/16) HMM, attn-scores were uniform. Didn't test
+      yet if recovering the system was possible...
+*   - Similar short attention structure for circle4
+* - QKV layers have no strong singular values
 """
+
+import json
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import safetensors.torch
+import torch
+from einops import repeat
+from tqdm.auto import trange
+from x_transformers import AutoregressiveWrapper, Decoder, TransformerWrapper
+
+
+@torch.no_grad()
+def sample_dataset(
+    model: TransformerWrapper,
+    num_batches: int,
+    batch_size: int,
+    seq_len: int,
+    device: str = "cuda",
+):
+    def filter_bos(logits: torch.Tensor, **kwargs):
+        logits[:, -1] = -torch.inf
+        return logits
+
+    autoregressive = AutoregressiveWrapper(model)
+    autoregressive.to(device)
+
+    outputs = []
+    prompts = torch.full((batch_size, 1), model.num_tokens - 1, device=device)
+
+    for i in trange(num_batches):
+        generation = autoregressive.generate(
+            prompts, seq_len, filter_logits_fn=filter_bos
+        )
+        outputs.append(generation)
+
+    outputs = torch.cat(outputs, dim=0)
+
+    inputs = torch.cat(
+        (
+            repeat(prompts, "batch token -> (repeat batch) token", repeat=num_batches),
+            outputs[:, :-1],
+        ),
+        dim=1,
+    )
+    (logits, embeddings), attn_maps = model(
+        inputs, return_logits_and_embeddings=True, return_attn=True
+    )
+
+    return inputs, outputs, logits, embeddings, attn_maps
+
+
+@torch.no_grad()
+def main():
+    # Paths
+    model_dir = "data/random/circle3/1layer_attn-only"
+
+    # Load model
+    with open(os.path.join(model_dir, "config.json"), mode="r") as f:
+        config_dict = json.load(f)
+
+    model = TransformerWrapper(
+        **config_dict["transformer"],
+        attn_layers=Decoder(**config_dict["decoder"]),
+    )
+
+    missing, unexpected = safetensors.torch.load_model(
+        model, os.path.join(model_dir, "model.safetensors")
+    )
+    print(missing, unexpected)
+
+    # Look at some singular values
+    if False:
+        u, s, v = torch.linalg.svd(model.token_emb.emb.weight, full_matrices=False)
+        print(u, s, v)
+
+        u, s, v = torch.linalg.svd(
+            model.attn_layers.layers[0][1].to_k.weight, full_matrices=False
+        )
+        print(u, s, v)
+
+        u, s, v = torch.linalg.svd(
+            model.attn_layers.layers[0][1].to_out.weight, full_matrices=False
+        )
+        print(u, s, v)
+
+    # Look at token encodings at different layers in terms of logits
+    to_embeddings = model.token_emb
+    to_logits = model.to_logits
+    attn_layer = model.attn_layers.layers[0][1]
+    norm_layer = model.attn_layers.layers[0][0][0]
+    final_norm = model.attn_layers.final_norm
+
+    token_embeddings = to_embeddings(torch.arange(4))
+    token_v = attn_layer.to_v(norm_layer(token_embeddings))
+    token_v_out = attn_layer.to_out(token_v)
+
+    print(to_logits(final_norm(token_embeddings)))
+    print(to_logits(final_norm(token_v)))
+    print(to_logits(final_norm(token_embeddings + token_v_out)))
+
+    # This reproduces the correct output
+    # print(to_logits(final_norm(token_embeddings + token_v_out)))
+
+    # Sample data
+    if True:
+        inputs, outputs, logits, embeddings, attn_maps = sample_dataset(
+            model, 1, 128, 256
+        )
+
+        print(outputs)
+        print(logits)
+        print(len(attn_maps))
+        print(attn_maps[0].shape)
+
+        # Plot attention scores
+        plt.figure()
+        plt.imshow(attn_maps[0][0, 0].cpu().numpy())
+        plt.colorbar()
+        plt.show()
+
+        plt.figure()
+        plt.imshow(torch.mean(attn_maps[0], dim=0)[0].cpu().numpy())
+        plt.colorbar()
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
