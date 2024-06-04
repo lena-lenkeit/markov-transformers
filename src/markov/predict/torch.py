@@ -1,5 +1,6 @@
 import torch
-from einops import einsum
+import torch.nn.functional as F
+from einops import einsum, rearrange, repeat
 from jaxtyping import Float, Int
 
 
@@ -44,3 +45,40 @@ def get_stationary_distribution(
     prior = one_vector / torch.sum(one_vector)
 
     return prior
+
+
+def get_optimal_beliefs(
+    observations: Int[torch.Tensor, "batch sequence"],
+    transition_matrix: Float[torch.Tensor, "state next_state"],
+    emission_matrix: Float[torch.Tensor, "state emission"],
+):
+    dim_batch, dim_sequence = observations.shape
+
+    # Get initial state
+    prior = get_stationary_distribution(transition_matrix)
+    belief_state = repeat(prior, "states -> batch states", batch=dim_batch)
+    probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
+
+    seq_beliefs = [belief_state]
+    seq_probs = [probs]
+    for j in range(dim_sequence - 1):
+        tokens = observations[:, j]
+
+        belief_state = update_posterior(belief_state, tokens, emission_matrix)
+        belief_state = propagate_values(belief_state, transition_matrix, normalize=True)
+
+        probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
+
+        seq_beliefs.append(belief_state)
+        seq_probs.append(probs)
+
+    seq_beliefs = torch.stack(seq_beliefs, dim=1)
+    seq_probs = torch.stack(seq_probs, dim=1)
+
+    seq_log_probs = torch.log(seq_probs)
+    loss = F.nll_loss(
+        rearrange(seq_log_probs, "batch sequence logits -> (batch sequence) logits"),
+        rearrange(observations, "batch sequence -> (batch sequence)"),
+    )
+
+    return seq_beliefs, seq_probs, loss
