@@ -13,7 +13,7 @@ from einops import rearrange
 from sklearn.decomposition import PCA
 from tqdm.auto import trange
 from x_transformers import Decoder, TransformerWrapper
-
+from x_transformers.x_transformers import SimpleRMSNorm
 from markov.predict.torch import get_optimal_beliefs
 
 
@@ -33,6 +33,8 @@ def main():
     num_outputs = num_states
     hmm_temperature = 1.0
     seq_len = 256
+
+    no_norm = False
 
     transformer_kwargs: Dict[str, Any] = dict(
         l2norm_embed=True,
@@ -82,7 +84,18 @@ def main():
         **transformer_kwargs,
         attn_layers=Decoder(**decoder_kwargs),
     ).to(device)
+
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+
+    # Patch model
+    if no_norm:
+
+        def identity_hook(module, args, outputs):
+            return args
+
+        for module in model.modules():
+            if isinstance(module, SimpleRMSNorm):
+                model.register_forward_hook(identity_hook)
 
     # Training
     pbar = trange(512)

@@ -59,6 +59,7 @@ Testing is necessary...
       yet if recovering the system was possible...
 *   - Similar short attention structure for circle4
 * - QKV layers have no strong singular values
+* - 1-layer, 1-head models without norm don't train at all
 """
 
 import json
