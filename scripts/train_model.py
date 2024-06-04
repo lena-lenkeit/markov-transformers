@@ -22,7 +22,7 @@ def main():
     # logits != linear interpolation over probabilites)
 
     # Paths
-    save_dir = "data"
+    os.makedirs(save_dir, exist_ok=True)
 
     # Parameters
     device = "cuda"
