@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 from tqdm.auto import trange
 from x_transformers import Decoder, TransformerWrapper
 
-from markov import HiddenMarkovModel, messn_matrices, sample_hmm
+from markov.predict.torch import get_optimal_beliefs
 
 
 def main():
@@ -163,6 +163,15 @@ def main():
         },
         os.path.join(save_dir, "eval.safetensors"),
     )
+
+    # Get optimal belief states and loss
+    optimal_beliefs, optimal_probs, optimal_loss = get_optimal_beliefs(
+        outputs.cpu(),
+        torch.from_numpy(hmm.transition_matrix),
+        torch.from_numpy(hmm.output_matrix),
+    )
+
+    print(f"Optimal Eval Loss: {optimal_loss:.2e}")
 
     # Perform PCA
     embeddings = embeddings.cpu().numpy()
