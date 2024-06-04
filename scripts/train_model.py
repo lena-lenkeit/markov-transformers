@@ -67,7 +67,15 @@ def main():
     #    ),
     # )
 
-    hmm = HiddenMarkovModel(*messn_matrices(n=num_states))
+
+    # Save HMM
+    safetensors.numpy.save_file(
+        {
+            "transition_matrix": hmm.transition_matrix,
+            "emission_matrix": hmm.output_matrix,
+        },
+        os.path.join(save_dir, "hmm.safetensors"),
+    )
 
     # Initialize model and optimizer
     model = TransformerWrapper(
