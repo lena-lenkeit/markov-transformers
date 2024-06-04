@@ -64,6 +64,7 @@ Testing is necessary...
 
 import json
 import os
+from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -117,7 +118,7 @@ def sample_dataset(
 @torch.no_grad()
 def main():
     # Paths
-    model_dir = "data/random/circle3/1layer_attn-only"
+    model_dir = "data/1layer_attn-only"
 
     # Load model
     with open(os.path.join(model_dir, "config.json"), mode="r") as f:
@@ -159,15 +160,24 @@ def main():
     token_v = attn_layer.to_v(norm_layer(token_embeddings))
     token_v_out = attn_layer.to_out(token_v)
 
-    print(to_logits(final_norm(token_embeddings)))
-    print(to_logits(final_norm(token_v)))
-    print(to_logits(final_norm(token_embeddings + token_v_out)))
+    # print(to_logits(final_norm(token_embeddings)))
+    # print(to_logits(final_norm(token_v)))
+    # print(to_logits(final_norm(token_embeddings + token_v_out)))
+
+    def emulate_sequence(token_sequence: List[int]):
+        emb = token_embeddings[token_sequence]
+        v_out = token_v_out[token_sequence]
+
+        return to_logits(final_norm(emb[-1] + torch.mean(v_out, dim=0)))
+
+    print(emulate_sequence([3, 1, 0, 0, 0, 0, 0, 0, 0]))
+    print(emulate_sequence([3, 0, 0, 0, 0, 0, 0, 1, 0]))
 
     # This reproduces the correct output
     # print(to_logits(final_norm(token_embeddings + token_v_out)))
 
     # Sample data
-    if True:
+    if False:
         inputs, outputs, logits, embeddings, attn_maps = sample_dataset(
             model, 1, 128, 256
         )
