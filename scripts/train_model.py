@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
+import safetensors.numpy
 import safetensors.torch
 import torch
 import torch.nn as nn
@@ -14,6 +15,14 @@ from sklearn.decomposition import PCA
 from tqdm.auto import trange
 from x_transformers import Decoder, TransformerWrapper
 from x_transformers.x_transformers import SimpleRMSNorm
+
+from markov import (
+    HiddenMarkovModel,
+    circle_matrices,
+    messn_matrices,
+    sample_hmm,
+    sample_matrix,
+)
 from markov.predict.torch import get_optimal_beliefs
 
 
@@ -22,6 +31,7 @@ def main():
     # logits != linear interpolation over probabilites)
 
     # Paths
+    save_dir = "data/mess3/2layer_halfalpha"
     os.makedirs(save_dir, exist_ok=True)
 
     # Parameters
@@ -38,14 +48,16 @@ def main():
 
     transformer_kwargs: Dict[str, Any] = dict(
         l2norm_embed=True,
+        # use_abs_pos_emb=False,
     )
     decoder_kwargs: Dict[str, Any] = dict(
         dim=128,
-        depth=1,
+        depth=2,
         heads=2,
         use_simple_rmsnorm=True,
         ff_glu=True,
         rotary_pos_emb=True,
+        # custom_layers=("a",) * 1,
     )
 
     # Derived parameters
@@ -61,7 +73,7 @@ def main():
     )
 
     # Initialize HMM
-    rng = np.random.default_rng(1)
+    rng = np.random.default_rng(3)
     # hmm = HiddenMarkovModel(
     #    sample_matrix(num_states, temperature=hmm_temperature, rng=rng),
     #    sample_matrix(
@@ -69,6 +81,11 @@ def main():
     #    ),
     # )
 
+    hmm = HiddenMarkovModel(*messn_matrices(n=num_states, alpha=0.5))
+    # hmm = HiddenMarkovModel(*circle_matrices(n=num_states))
+
+    print(hmm.transition_matrix)
+    print(hmm.output_matrix)
 
     # Save HMM
     safetensors.numpy.save_file(
