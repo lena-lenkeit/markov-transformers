@@ -35,11 +35,12 @@ class SequenceModel(nn.Module):
         attn_layer: nn.Module,
         attn_norm: bool,
         final_norm: bool,
+        logit_bias: bool = True,
     ):
         super().__init__()
 
         self.to_embeddings = TokenEmbedding(dim_model, num_tokens, l2norm_embed=True)
-        self.to_logits = nn.Linear(dim_model, num_tokens)
+        self.to_logits = nn.Linear(dim_model, num_tokens, bias=logit_bias)
         self.norm = SimpleRMSNorm(dim_model)
         self.attn_layer = attn_layer
         self.attn_norm = attn_norm
@@ -114,13 +115,18 @@ class FA(nn.Module):
         bias: bool,
         causal: bool,
         mult: float = 1e2,
+        has_v: bool = True,
+        has_o: bool = True,
     ):
         super().__init__()
 
         self.causal = causal
         self.mult = mult
+        self.has_v = has_v
+        self.has_o = has_o
 
         self.v_project = nn.Linear(dim_input, dim_v, bias=bias)
+        self.o_project = nn.Linear(dim_v, dim_input, bias=bias)
         self.m = nn.Parameter(torch.zeros((seq_len, seq_len)))
 
         with torch.no_grad():
@@ -137,9 +143,16 @@ class FA(nn.Module):
         return m
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.has_v:
+            v = self.v_project(x)
+        else:
+            v = x
+
         m = self.get_mixing_matrix()
-        v = self.v_project(x)
         o = einsum(m, v, "t s, ... s p -> ... t p")
+
+        if self.has_o:
+            o = self.o_project(o)
 
         return o
 
@@ -197,11 +210,14 @@ def main():
     device = "cuda"
     batch_size = 128
     eval_batch_size = 1024
+    num_train_steps = 1024
 
     num_states = 3
     num_outputs = num_states
     hmm_temperature = 2.0
     seq_len = 256
+
+    dim_model = 256
 
     rng = np.random.default_rng(14)
 
@@ -225,12 +241,22 @@ def main():
     # Initialize model and optimizer
     model = SequenceModel(
         num_tokens=num_tokens,
-        dim_model=256,
+        dim_model=dim_model,
         attn_layer=FA(
-            dim_input=256, dim_v=256, seq_len=seq_len, bias=True, causal=True, mult=1e2
+            dim_input=dim_model,
+            dim_v=dim_model,
+            seq_len=seq_len,
+            bias=False,  # Doesn't matter
+            causal=True,
+            mult=1e2,  # 1e2 trains well (this is just a gradient boosting hack)
+            # At least one projection true necessary
+            has_v=True,
+            has_o=False,
         ),
-        attn_norm=True,
+        # At least one norm true necessary
+        attn_norm=False,
         final_norm=True,
+        logit_bias=False,  # Doesn't matter
     ).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -260,7 +286,7 @@ def main():
     print(f"Optimal Eval Loss: {optimal_loss:.4e}, Random Eval Loss: {random_loss:.4e}")
 
     # Training
-    pbar = trange(1024)
+    pbar = trange(num_train_steps)
     for i in pbar:
         states, outputs = sample_hmm(hmm, seq_len, batch_size, rng)
         states = torch.from_numpy(states).to(device)
