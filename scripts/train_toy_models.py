@@ -233,7 +233,9 @@ def main():
         final_norm=True,
     ).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.998)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_train_steps, eta_min=3e-5
+    )
 
     # Get optimal belief states and loss
     with torch.no_grad():
