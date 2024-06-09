@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,12 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from einops import einsum, rearrange
-from opt_einsum import contract
-from sklearn.decomposition import PCA
+from einops import rearrange
 from tqdm.auto import trange
-from x_transformers import Decoder, TransformerWrapper
-from x_transformers.x_transformers import SimpleRMSNorm, TokenEmbedding
 
 from markov import (
     HiddenMarkovModel,
@@ -25,177 +21,7 @@ from markov import (
     sample_matrix,
 )
 from markov.predict.torch import get_optimal_beliefs
-
-
-class SequenceModel(nn.Module):
-    def __init__(
-        self,
-        num_tokens: int,
-        dim_model: int,
-        attn_layer: nn.Module,
-        attn_norm: bool,
-        final_norm: bool,
-        logit_bias: bool = True,
-    ):
-        super().__init__()
-
-        self.to_embeddings = TokenEmbedding(dim_model, num_tokens, l2norm_embed=True)
-        self.to_logits = nn.Linear(dim_model, num_tokens, bias=logit_bias)
-        self.norm = SimpleRMSNorm(dim_model)
-        self.attn_layer = attn_layer
-        self.attn_norm = attn_norm
-        self.final_norm = final_norm
-
-        with torch.no_grad():
-            self.to_embeddings.emb.weight.normal_(std=1e-4)
-
-    def forward(self, token_ids: torch.Tensor):
-        token_embeddings = self.to_embeddings(token_ids)
-        attn_outs = self.attn_layer(token_embeddings)
-
-        if self.attn_norm:
-            attn_outs = self.norm(attn_outs)
-
-        final_outs = token_embeddings + attn_outs
-        if self.final_norm:
-            final_outs = self.norm(final_outs)
-
-        logits = self.to_logits(final_outs)
-        return logits
-
-
-# TBD
-class FWA(nn.Module):
-    """Single-headed fixed sliding attention, with a data-independent mixing vector"""
-
-    def __init__(
-        self,
-        dim_input: int,
-        dim_v: int,
-        seq_len: int,
-        bias: bool,
-        mult: float = 1e2,
-    ):
-        super().__init__()
-
-        self.mult = mult
-
-        self.v_project = nn.Linear(dim_input, dim_v, bias=bias)
-        self.m = nn.Parameter(torch.zeros((seq_len, seq_len)))
-
-        with torch.no_grad():
-            self.m.data.normal_(std=1e-4)
-
-    def get_mixing_matrix(self):
-        m = self.m
-
-        if self.causal:
-            m = torch.where(torch.tril(torch.ones_like(m)) == 0, -torch.inf, m)
-
-        m = F.softmax(m * self.mult, dim=1)
-
-        return m
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        m = self.get_mixing_matrix()
-        v = self.v_project(x)
-        o = einsum(m, v, "t s, ... s p -> ... t p")
-
-        return o
-
-
-class FA(nn.Module):
-    """Single-headed fixed attention, with a data-independent mixing matrix"""
-
-    def __init__(
-        self,
-        dim_input: int,
-        dim_v: int,
-        seq_len: int,
-        bias: bool,
-        causal: bool,
-        mult: float = 1e2,
-        has_v: bool = True,
-        has_o: bool = True,
-    ):
-        super().__init__()
-
-        self.causal = causal
-        self.mult = mult
-        self.has_v = has_v
-        self.has_o = has_o
-
-        self.v_project = nn.Linear(dim_input, dim_v, bias=bias)
-        self.o_project = nn.Linear(dim_v, dim_input, bias=bias)
-        self.m = nn.Parameter(torch.zeros((seq_len, seq_len)))
-
-        with torch.no_grad():
-            self.m.data.normal_(std=1e-4)
-
-    def get_mixing_matrix(self):
-        m = self.m
-
-        if self.causal:
-            m = torch.where(torch.tril(torch.ones_like(m)) == 0, -torch.inf, m)
-
-        m = F.softmax(m * self.mult, dim=1)
-
-        return m
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.has_v:
-            v = self.v_project(x)
-        else:
-            v = x
-
-        m = self.get_mixing_matrix()
-        o = einsum(m, v, "t s, ... s p -> ... t p")
-
-        if self.has_o:
-            o = self.o_project(o)
-
-        return o
-
-
-# TBD
-class MA(nn.Module):
-    """Single-headed masked attention"""
-
-    def __init__(
-        self,
-        dim_input: int,
-        dim_qk: int,
-        dim_v: int,
-        bias: bool,
-        seq_len: int,
-        kernel_fn: Callable,
-    ):
-        super().__init__()
-
-        self.q_project = nn.Linear(dim_input, dim_qk, bias=bias)
-        self.k_project = nn.Linear(dim_input, dim_qk, bias=bias)
-        self.v_project = nn.Linear(dim_input, dim_v, bias=bias)
-        self.l = nn.Parameter(torch.zeros((seq_len, seq_len)))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q = self.q_project(x)
-        k = self.k_project(x)
-        v = self.v_project(x)
-
-        o = contract("tn, sn, sp, ts -> tp", q, k, v, self.l.tril(), backend="torch")
-        return o
-
-
-# TBD
-class SMA(nn.Module):
-    """Single-headed structured masked attention"""
-
-
-# TBD
-class SSM(nn.Module):
-    "Discrete time-invariant state space model"
-
-    # def __init__(self,)
+from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
 
 
 def main():
@@ -203,7 +29,7 @@ def main():
     # logits != linear interpolation over probabilites)
 
     # Paths
-    save_dir = "data/mess3/2layer_halfalpha"
+    save_dir = "data/mess3/custom/"
     os.makedirs(save_dir, exist_ok=True)
 
     # Parameters
@@ -211,10 +37,12 @@ def main():
     batch_size = 128
     eval_batch_size = 1024
     num_train_steps = 1024
+    lr_start = 3e-4
+    lr_end = 3e-5
+    weight_decay = 1e-2
 
     num_states = 3
     num_outputs = num_states
-    hmm_temperature = 2.0
     seq_len = 256
 
     dim_model = 256
@@ -225,42 +53,49 @@ def main():
     num_tokens = num_outputs + 1  # HMM output tokens + BOS token
     bos_token_id = num_tokens - 1
 
-    # Initialize HMM
-    # hmm = HiddenMarkovModel(*messn_matrices(n=num_states, alpha=0.5))
-
-    hmm = HiddenMarkovModel(
-        sample_matrix(num_states, temperature=hmm_temperature, rng=rng),
-        sample_matrix(
-            num_states, num_outputs=num_outputs, temperature=hmm_temperature, rng=rng
-        ),
+    # Model parameter dicts
+    model_kwargs: Dict[str, Any] = dict(
+        num_tokens=num_tokens,
+        dim_model=dim_model,
+        # At least one norm true necessary
+        attn_norm=True,
+        final_norm=False,
+        logit_bias=False,  # Doesn't matter
     )
+    attn_layer_kwargs: Dict[str, Any] = dict(
+        dim_input=dim_model,
+        dim_v=dim_model,
+        seq_len=seq_len,
+        bias=False,  # Doesn't matter
+        causal=True,
+        mult=1e2,  # 1e2 trains well (this is just a gradient boosting hack)
+        # At least one projection true necessary
+        has_v=True,
+        has_o=False,
+    )
+
+    # Initialize HMM
+    hmm = HiddenMarkovModel(*messn_matrices(n=num_states, alpha=0.85))
 
     print(hmm.transition_matrix)
     print(hmm.output_matrix)
 
+    # Save HMM
+    safetensors.numpy.save_file(
+        {
+            "transition_matrix": hmm.transition_matrix,
+            "emission_matrix": hmm.output_matrix,
+        },
+        os.path.join(save_dir, "hmm.safetensors"),
+    )
+
     # Initialize model and optimizer
     model = SequenceModel(
-        num_tokens=num_tokens,
-        dim_model=dim_model,
-        attn_layer=FA(
-            dim_input=dim_model,
-            dim_v=dim_model,
-            seq_len=seq_len,
-            bias=False,  # Doesn't matter
-            causal=True,
-            mult=1e2,  # 1e2 trains well (this is just a gradient boosting hack)
-            # At least one projection true necessary
-            has_v=True,
-            has_o=False,
-        ),
-        # At least one norm true necessary
-        attn_norm=False,
-        final_norm=True,
-        logit_bias=False,  # Doesn't matter
+        **model_kwargs, attn_layer=SingleHeadFixedAttention(**attn_layer_kwargs)
     ).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=lr_start, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=num_train_steps, eta_min=3e-5
+        optimizer, T_max=num_train_steps, eta_min=lr_end
     )
 
     # Get optimal belief states and loss
@@ -284,6 +119,19 @@ def main():
         )
 
     print(f"Optimal Eval Loss: {optimal_loss:.4e}, Random Eval Loss: {random_loss:.4e}")
+
+    # Save optimal prediction data
+    safetensors.torch.save_file(
+        {
+            "states": optimal_states,
+            "outputs": optimal_outputs,
+            "beliefs": optimal_beliefs,
+            "probs": optimal_probs,
+            "loss": optimal_loss,
+            "random": random_loss,
+        },
+        os.path.join(save_dir, "optimal.safetensors"),
+    )
 
     # Training
     pbar = trange(num_train_steps)
@@ -314,6 +162,16 @@ def main():
             f"Loss: {loss:.4e}, Regret: {loss - optimal_loss:.4e}, LR: {lr:.2e}"
         )
 
+    # Save model
+    config_dict = {"model": model_kwargs, "attn_layer": attn_layer_kwargs}
+    safetensors.torch.save_model(
+        model,
+        os.path.join(save_dir, "model.safetensors"),
+        metadata={"config": json.dumps(config_dict)},
+    )
+    with open(os.path.join(save_dir, "config.json"), mode="w") as f:
+        json.dump(config_dict, f, indent=4)
+
     # Evaluation
     with torch.no_grad():
         tokens = optimal_outputs.clone()
@@ -322,7 +180,7 @@ def main():
         tokens = torch.roll(tokens, shifts=1, dims=1)
         tokens[:, 0] = bos_token_id
 
-        logits = model.forward(tokens)
+        logits, embeddings = model.forward(tokens, return_final=True)
         eval_loss = F.cross_entropy(
             rearrange(logits, "batch sequence logits -> (batch sequence) logits"),
             rearrange(targets, "batch sequence -> (batch sequence)"),
@@ -330,10 +188,18 @@ def main():
 
         print(f"Eval Loss: {eval_loss:.4e}, Regret: {eval_loss - optimal_loss:.4e}")
 
-    with torch.no_grad():
-        plt.figure()
-        plt.imshow(model.attn_layer.get_mixing_matrix().cpu().numpy())
-        plt.show()
+    # Save eval data
+    safetensors.torch.save_file(
+        {
+            "states": optimal_states,
+            "outputs": optimal_outputs,
+            "logits": logits,
+            "embeddings": embeddings,
+            "loss": eval_loss,
+            "regret": eval_loss - optimal_loss,
+        },
+        os.path.join(save_dir, "eval.safetensors"),
+    )
 
 
 if __name__ == "__main__":
