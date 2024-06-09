@@ -19,6 +19,7 @@ from markov import (
     messn_matrices,
     sample_hmm,
     sample_matrix,
+    trapn_matrices,
 )
 from markov.predict.torch import get_optimal_beliefs
 from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
@@ -29,23 +30,24 @@ def main():
     # logits != linear interpolation over probabilites)
 
     # Paths
-    save_dir = "data/mess3/custom/"
+    save_dir = "data/trap2/custom/"
     os.makedirs(save_dir, exist_ok=True)
 
     # Parameters
     device = "cuda"
     batch_size = 128
     eval_batch_size = 1024
-    num_train_steps = 1024
+    num_train_steps = 1024 * 8
     lr_start = 3e-4
     lr_end = 3e-5
-    weight_decay = 1e-2
+    weight_decay = 0.0
 
-    num_states = 3
-    num_outputs = num_states
+    num_states = 2
+    num_outputs = num_states + 1
+    hmm_temperature = 2.0
     seq_len = 256
 
-    dim_model = 256
+    dim_model = 128
 
     rng = np.random.default_rng(14)
 
@@ -57,10 +59,12 @@ def main():
     model_kwargs: Dict[str, Any] = dict(
         num_tokens=num_tokens,
         dim_model=dim_model,
+        l2norm_embed=False,  # For tiny models (w.o. a proj.), false is more expressive
         # At least one norm true necessary
         attn_norm=True,
         final_norm=False,
         logit_bias=False,  # Doesn't matter
+        has_residual=False,  # Works even with no residual
     )
     attn_layer_kwargs: Dict[str, Any] = dict(
         dim_input=dim_model,
@@ -69,13 +73,26 @@ def main():
         bias=False,  # Doesn't matter
         causal=True,
         mult=1e2,  # 1e2 trains well (this is just a gradient boosting hack)
-        # At least one projection true necessary
-        has_v=True,
+        # At least one projection true necessary (if there is a residual, otherwise not)
+        has_v=False,
         has_o=False,
     )
 
     # Initialize HMM
-    hmm = HiddenMarkovModel(*messn_matrices(n=num_states, alpha=0.85))
+    # hmm = HiddenMarkovModel(*messn_matrices(n=num_states, alpha=0.85)) # MessN
+    hmm = HiddenMarkovModel(*trapn_matrices(n=num_states, x=0.1, alpha=0.25))  # TrapN
+    # TODO: Also try the one-sided trap2 variant, easy to visualize in 2d
+
+    if False:
+        hmm = HiddenMarkovModel(
+            sample_matrix(num_states, temperature=hmm_temperature, rng=rng),
+            sample_matrix(
+                num_states,
+                num_outputs=num_outputs,
+                temperature=hmm_temperature,
+                rng=rng,
+            ),
+        )
 
     print(hmm.transition_matrix)
     print(hmm.output_matrix)
@@ -194,7 +211,7 @@ def main():
             "states": optimal_states,
             "outputs": optimal_outputs,
             "logits": logits,
-            "embeddings": embeddings,
+            "embeddings": embeddings.contiguous(),
             "loss": eval_loss,
             "regret": eval_loss - optimal_loss,
         },
