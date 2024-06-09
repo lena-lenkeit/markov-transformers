@@ -4,6 +4,7 @@ import os
 import safetensors.torch
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 
 from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
 
@@ -98,11 +99,119 @@ def basic_sim_analysis(model: SequenceModel, config: dict):
     print(xwo_sim)
 
 
+def plot_attention_matrix(model: SequenceModel, config: dict):
+    plt.figure()
+    plt.imshow(model.attn_layer.get_mixing_matrix(), cmap="magma")
+    plt.colorbar()
+    plt.show()
+
+
+def plot_arrow_sequence(model: SequenceModel, config: dict):
+    o = model.to_logits.weight
+    v = model.attn_layer.v_project.weight
+    m = model.attn_layer.get_mixing_matrix()
+
+    token_seq = torch.arange(config["model"]["num_tokens"] - 1)
+    e = model.to_embeddings(token_seq)
+    x = model.attn_layer.v_project(e)
+
+    # Get orthogonal basis for X
+    x_svd = torch.linalg.svd(x, full_matrices=False)
+    x_basis = x_svd.Vh
+    x_projected = x_svd.U
+
+    # Get reading directions for the output logit head
+    o_projected = o[:2] @ x_basis.T
+
+    # Map a sequence to the basis space
+    token_seq = torch.randint(config["model"]["num_tokens"] - 1, size=(256,))
+    x_sequence = x_projected[:, token_seq].T * m[-1][:, None]
+    x_sequence = torch.cumsum(x_sequence, dim=0)
+    x_sequence = torch.cat((torch.zeros_like(x_sequence[:1]), x_sequence), dim=0)
+
+    plt.figure()
+    plt.plot(*x_sequence.T)
+    plt.plot(*x_sequence[[0, -1]].T, color="tab:red")
+    plt.plot([0, o_projected[0, 0]], [0, o_projected[0, 1]], color="tab:green")
+    plt.plot([0, o_projected[1, 0]], [0, o_projected[1, 1]], color="tab:green")
+    plt.show()
+
+
+def plot_arrow_sequence_minimal_model(model: SequenceModel, config: dict):
+    o = model.to_logits.weight
+    m = model.attn_layer.get_mixing_matrix()
+
+    token_seq = torch.arange(config["model"]["num_tokens"] - 1)
+    e = model.to_embeddings(token_seq)
+
+    # Get orthogonal basis for X
+    e_svd = torch.linalg.svd(e, full_matrices=False)
+    e_basis = e_svd.Vh
+    e_projected = e_svd.U
+
+    # Get reading directions for the output logit head
+    o_projected = o[:2] @ e_basis.T
+
+    # Map a sequence to the basis space
+    token_seq = torch.randint(config["model"]["num_tokens"] - 1, size=(256,))
+    e_sequence = e_projected[:, token_seq].T * m[-1][:, None]
+    e_sequence = torch.cumsum(e_sequence, dim=0)
+    e_sequence = torch.cat((torch.zeros_like(e_sequence[:1]), e_sequence), dim=0)
+
+    # Plot basis space
+    plt.figure()
+    plt.title("Basis Space Vectors")
+    plt.xlabel("Basis Vector 1")
+    plt.ylabel("Basis Vector 2")
+    plt.plot([0, e_projected[0, 0]], [0, e_projected[0, 1]], label="Token 1 Write")
+    plt.plot([0, e_projected[1, 0]], [0, e_projected[1, 1]], label="Token 2 Write")
+    plt.plot([0, o_projected[0, 0]], [0, o_projected[0, 1]], label="Token 1 Read")
+    plt.plot([0, o_projected[1, 0]], [0, o_projected[1, 1]], label="Token 2 Read")
+    plt.legend()
+    plt.show()
+
+    # Plot sequence
+    plt.figure()
+    plt.title("Token Sequence in Basis Space")
+    plt.plot(*e_sequence.T, label="Sequence")
+    plt.plot(*e_sequence[[0, -1]].T, label="Result")
+    plt.plot(
+        [0, e_projected[0, 0]],
+        [0, e_projected[0, 1]],
+        linestyle="--",
+        label="Token 1 Write",
+    )
+    plt.plot(
+        [0, e_projected[1, 0]],
+        [0, e_projected[1, 1]],
+        linestyle="--",
+        label="Token 2 Write",
+    )
+    plt.plot(
+        [0, o_projected[0, 0]],
+        [0, o_projected[0, 1]],
+        linestyle="--",
+        label="Token 1 Read",
+    )
+    plt.plot(
+        [0, o_projected[1, 0]],
+        [0, o_projected[1, 1]],
+        linestyle="--",
+        label="Token 2 Read",
+    )
+    plt.legend()
+    plt.show()
+
+
 @torch.no_grad()
 def main():
-    model_dir = "data/mess3/custom"
+    model_dir = "data/mess2/custom"
     model, config = load_model(model_dir)
-    basic_sim_analysis(model, config)
+
+    # plot_arrow_sequence(model, config)
+    plot_arrow_sequence_minimal_model(model, config)
+    # plot_attention_matrix(model, config)
+    # basic_sim_analysis(model, config)
 
 
 if __name__ == "__main__":
