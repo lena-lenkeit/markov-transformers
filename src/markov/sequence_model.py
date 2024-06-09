@@ -14,15 +14,20 @@ class SequenceModel(nn.Module):
         attn_norm: bool,
         final_norm: bool,
         logit_bias: bool = True,
+        has_residual: bool = True,
+        l2norm_embed: bool = True,
     ):
         super().__init__()
 
-        self.to_embeddings = TokenEmbedding(dim_model, num_tokens, l2norm_embed=True)
+        self.to_embeddings = TokenEmbedding(
+            dim_model, num_tokens, l2norm_embed=l2norm_embed
+        )
         self.to_logits = nn.Linear(dim_model, num_tokens, bias=logit_bias)
         self.norm = SimpleRMSNorm(dim_model)
         self.attn_layer = attn_layer
         self.attn_norm = attn_norm
         self.final_norm = final_norm
+        self.has_residual = has_residual
 
         with torch.no_grad():
             self.to_embeddings.emb.weight.normal_(std=1e-4)
@@ -34,7 +39,10 @@ class SequenceModel(nn.Module):
         if self.attn_norm:
             attn_outs = self.norm(attn_outs)
 
-        final_outs = token_embeddings + attn_outs
+        final_outs = attn_outs
+        if self.has_residual:
+            final_outs = final_outs + token_embeddings
+
         if self.final_norm:
             final_outs = self.norm(final_outs)
 
