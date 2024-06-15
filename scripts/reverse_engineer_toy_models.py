@@ -1,11 +1,19 @@
 import json
 import os
 
+import safetensors.numpy
 import safetensors.torch
 import torch
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
+from tqdm.auto import trange
 
+from markov.predict.torch import (
+    get_optimal_beliefs,
+    get_stationary_distribution,
+    propagate_values,
+    update_posterior,
+)
 from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
 
 
@@ -26,7 +34,14 @@ def load_model(model_dir: str):
     )
     print(missing, unexpected)
 
-    return model, config_dict
+    # Load HMM
+    hmm_np = safetensors.numpy.load_file(os.path.join(model_dir, "hmm.safetensors"))
+    hmm = {
+        "transition_matrix": torch.from_numpy(hmm_np["transition_matrix"]).float(),
+        "emission_matrix": torch.from_numpy(hmm_np["emission_matrix"]).float(),
+    }
+
+    return model, config_dict, hmm
 
 
 def remove_component(x: torch.Tensor, component: torch.Tensor) -> torch.Tensor:
@@ -203,11 +218,168 @@ def plot_arrow_sequence_minimal_model(model: SequenceModel, config: dict):
     plt.show()
 
 
+def plot_expected_information_gain(model: SequenceModel, config: dict, hmm: dict):
+    num_samples = 1024 * 128
+    num_tokens = config["model"]["num_tokens"] - 1
+    seq_len = config["attn_layer"]["seq_len"]
+
+    num_states = hmm["transition_matrix"].shape[1]
+    num_emissions = hmm["emission_matrix"].shape[1]
+
+    # * Via a closed form method, deriving the EIG of the T and E matrices
+    # * We are looking for the expected information gain. Let's first derive the
+    #   information gain for a single transition or emission event.
+    # * Assume we have a prior p and observe some evidence o, such that we now have the
+    #   posterior q. The amount of information we gained is the weighted surprise / the
+    #   KL-divergence KL(p||q) = \sum q_i \log_2 q_i/p_i.
+    # * The expected information gain is the expectation of KL(p||q) when sampling p and
+    #   o over an unbiased prior. Sampling over o is easy: Since it's discrete, we just
+    #   average. However, p is continuous, so we need to find the corresponding
+    #   integral.
+    # * Sampling is pssible here, but we don't have the true prior of p...
+
+    priors = torch.rand((num_samples, num_states))
+    priors = priors / torch.sum(priors, dim=1, keepdim=True)
+    emissions = torch.randint(num_tokens, size=(num_samples,))
+
+    posteriors = update_posterior(priors, emissions, hmm["emission_matrix"])
+    posteriors_propagated = propagate_values(
+        posteriors, hmm["transition_matrix"], normalize=True
+    )
+    priors_propagated = propagate_values(
+        priors, hmm["transition_matrix"], normalize=True
+    )
+
+    kl = F.kl_div(
+        torch.log(priors),
+        torch.log(posteriors_propagated),
+        log_target=True,
+        reduction="batchmean",
+    )
+    kl_no_update = F.kl_div(
+        torch.log(priors),
+        torch.log(priors_propagated),
+        log_target=True,
+        reduction="batchmean",
+    )
+    kl_no_propagate = F.kl_div(
+        torch.log(priors),
+        torch.log(posteriors),
+        log_target=True,
+        reduction="batchmean",
+    )
+    print(kl, kl_no_update, kl_no_propagate)
+
+    # Like below, but batched for efficiency
+    token_seq = torch.randint(num_tokens, size=(num_samples, seq_len))
+    optimal_belief_seq, optimal_prob_seq, optimal_loss = get_optimal_beliefs(
+        token_seq, hmm["transition_matrix"], hmm["emission_matrix"]
+    )
+
+    eig = []
+    for i in trange(seq_len):
+        optimal_prob = optimal_prob_seq[:, -1]
+        optimal_belief = optimal_belief_seq[:, -1]
+        start_belief = optimal_belief_seq[:, i]
+
+        chained_matrix = torch.linalg.matrix_power(
+            hmm["transition_matrix"], seq_len - i
+        )
+        belief = propagate_values(start_belief, chained_matrix, normalize=True)
+        prob = propagate_values(belief, hmm["emission_matrix"], normalize=True)
+
+        """
+        optimal_loss_at_i = F.nll_loss(
+            torch.log(optimal_prob_seq[:, i]), token_seq[:, i]
+        )
+        base_loss_at_i = F.nll_loss(torch.log(prob), token_seq[:, i])
+
+        eig.append(optimal_loss_at_i - base_loss_at_i)
+        """
+
+        # eig.append(torch.mean(torch.sum(optimal_prob * torch.log(prob), dim=-1)))
+
+        # This (the cross-entropy between the probabilites derived with and without
+        # including model emissions) seems to match the M matrix!
+        eig.append(torch.mean(torch.sum(prob * torch.log(optimal_prob), dim=-1)))
+
+        """
+        eig.append(
+            -F.kl_div(
+                torch.log(prob),
+                torch.log(optimal_prob),
+                log_target=True,
+                reduction="batchmean",
+            )
+        )
+        """
+
+        """
+        eig.append(
+            -F.kl_div(
+                torch.log(belief),
+                torch.log(optimal_belief),
+                log_target=True,
+                reduction="batchmean",
+            )
+        )
+        """
+
+    eig = torch.FloatTensor(eig)
+
+    fig, ax = plt.subplots(2, 1, sharex=True)
+    ax[0].plot(eig)
+    ax[1].plot(model.attn_layer.get_mixing_matrix()[-1])
+    plt.show()
+
+    # Via a sampling based method over entire sequences
+    eig = torch.zeros(seq_len)
+    for sample_id in trange(num_samples):
+        # * Sample a random sequence of tokens and get the optimal belief states for
+        # that sequence. Then, look at the predictive power of each optimal belief state
+        # at time step t for the final time step when propagated forward without
+        # applying observations (i.e. only applying the transition matrix). This
+        # quantity should be related to the expected information gain from also
+        # including the observations vs. simply using prior knowledge of the transition
+        # and emission matrix.
+        # * My idea is that this metric is related to M, the sequence kernel.
+
+        token_seq = torch.randint(num_tokens, size=(seq_len,))
+        optimal_belief_seq, optimal_prob_seq, optimal_loss = get_optimal_beliefs(
+            token_seq[None], hmm["transition_matrix"], hmm["emission_matrix"]
+        )
+
+        ig = []
+        for i in range(seq_len):
+            belief = optimal_belief_seq[0, i]
+            chained_matrix = torch.linalg.matrix_power(
+                hmm["transition_matrix"], seq_len - i
+            )
+            belief = propagate_values(belief, chained_matrix, normalize=True)
+            prob = propagate_values(belief, hmm["emission_matrix"], normalize=True)
+
+            optimal_loss_at_i = F.nll_loss(
+                torch.log(optimal_prob_seq[0, i]), token_seq[i]
+            )
+            base_loss_at_i = F.nll_loss(torch.log(prob), token_seq[i])
+
+            ig.append(optimal_loss_at_i - base_loss_at_i)
+
+        eig = eig + torch.FloatTensor(ig)
+
+    eig = eig / num_samples
+
+    plt.figure()
+    plt.plot(eig)
+    plt.show()
+
+
 @torch.no_grad()
 def main():
     model_dir = "data/mess2/custom"
-    model, config = load_model(model_dir)
+    model, config, hmm = load_model(model_dir)
 
+    plot_expected_information_gain(model, config, hmm)
     # plot_arrow_sequence(model, config)
     plot_arrow_sequence_minimal_model(model, config)
     # plot_attention_matrix(model, config)
