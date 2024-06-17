@@ -1,13 +1,22 @@
 import json
 import os
 
+import mpl_toolkits.mplot3d as plt3d
+import numpy as np
 import safetensors.numpy
 import safetensors.torch
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import axes3d
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from tqdm.auto import trange
 
+from markov import sample_hmm
+from markov.markov import HiddenMarkovModel
 from markov.predict.torch import (
     get_optimal_beliefs,
     get_stationary_distribution,
@@ -218,6 +227,66 @@ def plot_arrow_sequence_minimal_model(model: SequenceModel, config: dict):
     plt.show()
 
 
+def plot_subspace(model: SequenceModel, config: dict, hmm: dict, plot_3d: bool = False):
+    token_seq = torch.arange(config["model"]["num_tokens"] - 1)
+
+    e = model.to_embeddings(token_seq)
+    o = model.to_logits.weight
+
+    # Get orthogonal basis for X
+    e_svd = torch.linalg.svd(e, full_matrices=False)
+    e_basis = e_svd.Vh
+    e_projected = e_svd.U
+
+    # Get reading directions for the output logit head
+    o_projected = o[:-1] @ e_basis.T
+
+    # Plot basis space
+    if plot_3d:
+        fig = plt.figure()
+        ax = fig.add_subplot(projection="3d")
+
+        ax.set_title("Basis Space Vectors")
+        ax.set_xlabel("Basis Vector 1")
+        ax.set_ylabel("Basis Vector 2")
+        ax.set_zlabel("Basis Vector 3")
+
+        ax.set_aspect("equal", adjustable="box")
+
+        for i, vec in enumerate(e_projected):
+            ax.plot([0, vec[0]], [0, vec[1]], [0, vec[2]], label=f"Token {i} Write")
+        ax.set_prop_cycle(None)
+        for i, vec in enumerate(o_projected):
+            plt.plot(
+                [0, vec[0]],
+                [0, vec[1]],
+                [0, vec[2]],
+                linestyle="--",
+                label=f"Token {i} Read",
+            )
+
+        triangle = plt3d.art3d.Poly3DCollection([e_projected])
+        triangle.set_alpha(0.25)
+        triangle.set_color("tab:grey")
+        triangle.set_edgecolor("black")
+        ax.add_collection3d(triangle)
+
+        ax.legend()
+        plt.show()
+    else:
+        plt.figure()
+        plt.title("Basis Space Vectors")
+        plt.xlabel("Basis Vector 1")
+        plt.ylabel("Basis Vector 2")
+        for i, vec in enumerate(e_projected):
+            plt.plot([0, vec[0]], [0, vec[1]], label=f"Token {i} Write")
+        plt.gca().set_prop_cycle(None)
+        for i, vec in enumerate(o_projected):
+            plt.plot([0, vec[0]], [0, vec[1]], linestyle="--", label=f"Token {i} Read")
+        plt.legend()
+        plt.show()
+
+
 def plot_expected_information_gain(model: SequenceModel, config: dict, hmm: dict):
     num_samples = 1024 * 128
     num_tokens = config["model"]["num_tokens"] - 1
@@ -374,15 +443,289 @@ def plot_expected_information_gain(model: SequenceModel, config: dict, hmm: dict
     plt.show()
 
 
+def emission_eig_at(
+    model: SequenceModel, config: dict, hmm: dict, at: int, num_samples: int
+):
+    num_tokens = config["model"]["num_tokens"] - 1
+
+    # Like below, but batched for efficiency
+    # TODO: This is the wrong expectation, these should be HMM sequences
+    # token_seq = torch.randint(num_tokens, size=(num_samples, at))
+    _, token_seq = sample_hmm(
+        HiddenMarkovModel(
+            hmm["transition_matrix"].numpy(), hmm["emission_matrix"].numpy()
+        ),
+        at,
+        num_samples,
+        np.random.default_rng(1234),
+    )
+    token_seq = torch.from_numpy(token_seq)
+
+    optimal_belief_seq, optimal_prob_seq, optimal_loss = get_optimal_beliefs(
+        token_seq, hmm["transition_matrix"], hmm["emission_matrix"]
+    )
+
+    eig = []
+    for i in trange(at):
+        optimal_prob = optimal_prob_seq[:, -1]
+        optimal_belief = optimal_belief_seq[:, -1]
+        start_belief = optimal_belief_seq[:, i]
+
+        chained_matrix = torch.linalg.matrix_power(hmm["transition_matrix"], at - i - 1)
+        belief = propagate_values(start_belief, chained_matrix, normalize=True)
+        prob = propagate_values(belief, hmm["emission_matrix"], normalize=True)
+
+        # This (the cross-entropy between the probabilites derived with and without
+        # including model emissions) seems to match the M matrix!
+        eig.append(torch.mean(torch.sum(prob * torch.log(optimal_prob), dim=-1)))
+
+    return torch.stack(eig)
+
+
+def construct_from_hmm(
+    model: SequenceModel, config: dict, hmm: dict, verbose: bool = True
+):
+    seq_len = config["attn_layer"]["seq_len"]
+
+    transition_matrix = hmm["transition_matrix"]
+    emission_matrix = hmm["emission_matrix"]
+    prob_matrix = (transition_matrix @ emission_matrix).T
+    # prob_matrix = -torch.log(prob_matrix)
+
+    # emission_eig = -torch.log(emission_matrix).T
+    emission_eig = torch.eye(emission_matrix.shape[0]).float()
+    emission_eig += 5.0
+    # emission_eig = emission_matrix.T
+
+    if verbose:
+        plt.figure(figsize=(6, 6))
+        for eig in emission_eig:
+            plt.plot([0, eig[0]], [0, eig[1]])
+        for prob_vec in prob_matrix:
+            plt.plot([0, prob_vec[0]], [0, prob_vec[1]])
+        plt.show()
+
+    def to_m(x):
+        x = x - torch.min(x)
+        x = x / torch.sum(x)
+        x = torch.cat((x, torch.zeros(seq_len - x.shape[0])), dim=0)
+        return x
+
+    m_vec = to_m(emission_eig_at(model, config, hmm, seq_len, 1024 * 128))
+    m_mat = [m_vec]
+    for i in range(seq_len - 1):
+        m_vec = torch.roll(m_vec, -1)
+        m_vec[0] += m_vec[-1]
+        m_vec[-1] = 0
+
+        m_mat.append(m_vec)
+
+    m_mat = torch.stack(m_mat, dim=0)
+    m_mat = torch.flip(m_mat, dims=(0,))
+
+    # m_vec = to_m(emission_eig_at(model, config, hmm, seq_len, 1024 * 128))
+    # plt.figure()
+    # plt.plot(m_vec)
+    # plt.show()
+
+    # mixing_eig = torch.stack(
+    #    [
+    #        to_m(emission_eig_at(model, config, hmm, i + 1, 1024 * 16))
+    #        for i in range(seq_len)
+    #    ]
+    # )
+
+    if verbose:
+        plt.figure()
+        plt.imshow(m_mat, cmap="magma")
+        plt.show()
+
+    # Test synthetic model
+    num_tokens = config["model"]["num_tokens"] - 1
+
+    if verbose:
+        num_samples = 1024 * 128
+
+        # Like below, but batched for efficiency
+        # token_seq = torch.randint(num_tokens, size=(num_samples, seq_len))
+        _, token_seq = sample_hmm(
+            HiddenMarkovModel(transition_matrix.numpy(), emission_matrix.numpy()),
+            seq_len,
+            num_samples,
+            np.random.default_rng(1234),
+        )
+        token_seq = torch.from_numpy(token_seq)
+
+        optimal_belief_seq, optimal_prob_seq, optimal_loss = get_optimal_beliefs(
+            token_seq, hmm["transition_matrix"], hmm["emission_matrix"]
+        )
+
+    synth_model = SequenceModel(
+        num_tokens + 1,
+        dim_model=emission_eig.shape[0],
+        attn_layer=SingleHeadFixedAttention(
+            dim_input=emission_eig.shape[0],
+            dim_v=emission_eig.shape[0],
+            seq_len=seq_len,
+            bias=False,
+            causal=True,
+            has_v=False,
+            has_o=False,
+            # m=m_mat,
+            m=model.attn_layer.get_mixing_matrix(),
+        ),
+        attn_norm=True,
+        final_norm=False,
+        logit_bias=False,
+        has_residual=False,
+        l2norm_embed=False,
+        norm_p=1.0,
+    )
+
+    if verbose:
+        print(emission_eig, prob_matrix)
+
+    synth_model.to_embeddings.emb.weight.data.copy_(
+        F.normalize(
+            torch.cat((emission_eig, torch.ones_like(emission_eig[:1])), dim=0), dim=-1
+        )
+    )
+    synth_model.to_logits.weight.data.copy_(
+        F.normalize(
+            torch.cat((prob_matrix, torch.ones_like(prob_matrix[:1])), dim=0), dim=-1
+        )
+        * emission_eig.shape[0] ** -0.5
+    )
+
+    if verbose:
+        print(synth_model.to_embeddings.emb.weight.data)
+        print(synth_model.to_logits.weight.data)
+
+        bos_token_id = num_tokens
+
+        tokens = token_seq.clone()
+        tokens = torch.roll(tokens, shifts=1, dims=1)
+        tokens[:, 0] = bos_token_id
+
+        synth_probs, synth_post_norm = synth_model(token_seq, return_final=True)
+        synth_probs = F.softmax(synth_probs, dim=-1)
+
+        print(synth_probs.min(), synth_probs.max())
+        print(synth_post_norm.min(), synth_post_norm.max())
+        synth_loss = F.nll_loss(
+            rearrange(
+                torch.log(synth_probs),
+                "batch sequence logits -> (batch sequence) logits",
+            ),
+            rearrange(token_seq, "batch sequence -> (batch sequence)"),
+            reduction="none",
+        )
+
+        synth_loss = rearrange(
+            synth_loss,
+            "(batch sequence) -> batch sequence",
+            batch=num_samples,
+            sequence=seq_len,
+        )
+
+        plt.figure()
+        plt.plot(torch.mean(synth_loss, dim=0))
+        plt.show()
+
+        print(optimal_loss, torch.mean(synth_loss))
+
+    return synth_model
+
+
+def plot_belief_states(model: SequenceModel, config: dict, hmm: dict):
+    # HPs
+    num_samples = 1024 * 16
+    seq_start = 64
+    rng = np.random.default_rng(1234)
+
+    # Fetch data
+    seq_len = config["attn_layer"]["seq_len"]
+
+    transition_matrix = hmm["transition_matrix"]
+    emission_matrix = hmm["emission_matrix"]
+
+    hmm_markov = HiddenMarkovModel(transition_matrix.numpy(), emission_matrix.numpy())
+
+    # Sample ground truth HMM outputs
+    _, token_seq = sample_hmm(hmm_markov, seq_len, num_samples, rng)
+    token_seq = torch.from_numpy(token_seq)
+
+    # Sample optimal belief states
+    optimal_beliefs, optimal_probs, optimal_loss = get_optimal_beliefs(
+        token_seq, transition_matrix, emission_matrix
+    )
+
+    # Sample model beliefs
+    model_outputs, model_features = model(token_seq, return_final=True)
+
+    # Train linear probe
+    optimal_beliefs = optimal_beliefs[:, seq_start:]
+    model_features = model_features[:, seq_start:]
+
+    probe = make_pipeline(StandardScaler(), LinearRegression())
+    probe.fit(
+        rearrange(
+            model_features.numpy(),
+            "batch sequence features -> (batch sequence) features",
+        ),
+        rearrange(
+            optimal_beliefs.numpy(),
+            "batch sequence beliefs -> (batch sequence) beliefs",
+        ),
+    )
+    model_beliefs = probe.predict(
+        rearrange(
+            model_features.numpy(),
+            "batch sequence features -> (batch sequence) features",
+        )
+    )
+
+    # Plot
+    plt.figure(figsize=(8, 8))
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.hist2d(
+        optimal_beliefs[..., 0].flatten() + optimal_beliefs[..., 1].flatten() * 0.5,
+        optimal_beliefs[..., 1].flatten(),
+        bins=(256, 256),
+        norm="log",
+        cmap="magma",
+    )
+    plt.colorbar()
+    plt.show()
+
+    plt.figure(figsize=(8, 8))
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.hist2d(
+        model_beliefs[..., 0].flatten() + model_beliefs[..., 1].flatten() * 0.5,
+        model_beliefs[..., 1].flatten(),
+        bins=(256, 256),
+        norm="log",
+        cmap="magma",
+    )
+    plt.colorbar()
+    plt.show()
+
+
 @torch.no_grad()
 def main():
-    model_dir = "data/mess2/custom"
+    model_dir = "data/mess3/custom"
     model, config, hmm = load_model(model_dir)
 
-    plot_expected_information_gain(model, config, hmm)
-    # plot_arrow_sequence(model, config)
-    plot_arrow_sequence_minimal_model(model, config)
     # plot_attention_matrix(model, config)
+    # plot_arrow_sequence_minimal_model(model, config)
+    synth_model = construct_from_hmm(model, config, hmm, verbose=False)
+    plot_subspace(model, config, hmm, plot_3d=True)
+    plot_subspace(synth_model, config, hmm, plot_3d=True)
+    plot_belief_states(synth_model, config, hmm)
+    # plot_expected_information_gain(model, config, hmm)
+    # plot_arrow_sequence(model, config)
     # basic_sim_analysis(model, config)
 
 
