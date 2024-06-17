@@ -5,6 +5,16 @@ from einops import einsum
 from x_transformers.x_transformers import SimpleRMSNorm, TokenEmbedding
 
 
+class NormLayer(nn.Module):
+    def __init__(self, dim: int, p: float):
+        super().__init__()
+        self.scale = dim ** (1 / p)
+        self.p = p
+
+    def forward(self, x):
+        return F.normalize(x, p=self.p, dim=-1) * self.scale
+
+
 class SequenceModel(nn.Module):
     def __init__(
         self,
@@ -16,6 +26,7 @@ class SequenceModel(nn.Module):
         logit_bias: bool = True,
         has_residual: bool = True,
         l2norm_embed: bool = True,
+        norm_p: float = 2.0,
     ):
         super().__init__()
 
@@ -23,7 +34,7 @@ class SequenceModel(nn.Module):
             dim_model, num_tokens, l2norm_embed=l2norm_embed
         )
         self.to_logits = nn.Linear(dim_model, num_tokens, bias=logit_bias)
-        self.norm = SimpleRMSNorm(dim_model)
+        self.norm = NormLayer(dim_model, norm_p)
         self.attn_layer = attn_layer
         self.attn_norm = attn_norm
         self.final_norm = final_norm
@@ -67,6 +78,7 @@ class SingleHeadFixedAttention(nn.Module):
         mult: float = 1e2,
         has_v: bool = True,
         has_o: bool = True,
+        m: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -77,18 +89,26 @@ class SingleHeadFixedAttention(nn.Module):
 
         self.v_project = nn.Linear(dim_input, dim_v, bias=bias)
         self.o_project = nn.Linear(dim_v, dim_input, bias=bias)
-        self.m = nn.Parameter(torch.zeros((seq_len, seq_len)))
 
-        with torch.no_grad():
-            self.m.data.normal_(std=1e-4)
+        if m is None:
+            self.pretrained_m = False
+
+            self.m = nn.Parameter(torch.zeros((seq_len, seq_len)))
+
+            with torch.no_grad():
+                self.m.data.normal_(std=1e-4)
+        else:
+            self.pretrained_m = True
+            self.m = m.clone()
 
     def get_mixing_matrix(self):
         m = self.m
 
-        if self.causal:
-            m = torch.where(torch.tril(torch.ones_like(m)) == 0, -torch.inf, m)
+        if not self.pretrained_m:
+            if self.causal:
+                m = torch.where(torch.tril(torch.ones_like(m)) == 0, -torch.inf, m)
 
-        m = F.softmax(m * self.mult, dim=1)
+            m = F.softmax(m * self.mult, dim=1)
 
         return m
 
