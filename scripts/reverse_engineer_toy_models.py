@@ -243,6 +243,12 @@ def plot_subspace(model: SequenceModel, config: dict, hmm: dict, plot_3d: bool =
 
     # Plot basis space
     if plot_3d:
+        # Get simplex center
+        e_simplex_center = torch.mean(e_projected, dim=0, keepdim=True)
+
+        # Get vectors projected onto simplex
+        e_simplex_projected = e_projected - e_simplex_center
+
         fig = plt.figure()
         ax = fig.add_subplot(projection="3d")
 
@@ -253,8 +259,30 @@ def plot_subspace(model: SequenceModel, config: dict, hmm: dict, plot_3d: bool =
 
         ax.set_aspect("equal", adjustable="box")
 
+        # Token Write
         for i, vec in enumerate(e_projected):
             ax.plot([0, vec[0]], [0, vec[1]], [0, vec[2]], label=f"Token {i} Write")
+
+        # Simplex Center
+        ax.plot(
+            [0, e_simplex_center[0, 0]],
+            [0, e_simplex_center[0, 1]],
+            [0, e_simplex_center[0, 2]],
+            c="black",
+            label="_",
+        )
+
+        # Simplex Write
+        ax.set_prop_cycle(None)
+        for i, vec in enumerate(e_projected):
+            ax.plot(
+                [e_simplex_center[0, 0], vec[0]],
+                [e_simplex_center[0, 1], vec[1]],
+                [e_simplex_center[0, 2], vec[2]],
+                label="_",
+            )
+
+        # Token Read
         ax.set_prop_cycle(None)
         for i, vec in enumerate(o_projected):
             plt.plot(
