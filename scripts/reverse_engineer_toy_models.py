@@ -23,7 +23,12 @@ from markov.predict.torch import (
     propagate_values,
     update_posterior,
 )
-from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
+from markov.sequence_model import (
+    SequenceModel,
+    SingleHeadFixedAttention,
+    sample_from_model,
+)
+from markov.train import hmm_from_observations
 
 
 def load_model(model_dir: str):
@@ -740,6 +745,33 @@ def plot_belief_states(model: SequenceModel, config: dict, hmm: dict):
     plt.colorbar()
     plt.show()
 
+
+def get_model_hmm(model: SequenceModel, config: dict, hmm: dict):
+    # Get the best-fit HMM from samples observations
+    rng = np.random.default_rng(1234)
+
+    num_samples = 1024 * 4
+    batch_size = 1024 * 4
+
+    num_batches = num_samples // batch_size
+    seq_len = config["attn_layer"]["seq_len"]
+
+    transition_matrix = hmm["transition_matrix"]
+    emission_matrix = hmm["emission_matrix"]
+
+    hmm_markov = HiddenMarkovModel(transition_matrix.numpy(), emission_matrix.numpy())
+
+    model_tokens = sample_from_model(model, batch_size, num_batches, seq_len)
+
+    inferred_transition_matrix, inferred_emission_matrix, inferred_prior = (
+        hmm_from_observations(
+            model_tokens,
+            dim_state=emission_matrix.shape[0],
+            dim_observations=emission_matrix.shape[1],
+        )
+    )
+
+    print(inferred_transition_matrix, inferred_emission_matrix, inferred_prior)
 
 @torch.no_grad()
 def main():
