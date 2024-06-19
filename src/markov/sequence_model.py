@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import einsum
+from torch.distributions import Categorical
+from tqdm.auto import trange
 from x_transformers.x_transformers import SimpleRMSNorm, TokenEmbedding
 
 
@@ -30,6 +32,8 @@ class SequenceModel(nn.Module):
     ):
         super().__init__()
 
+        self.num_tokens = num_tokens
+
         self.to_embeddings = TokenEmbedding(
             dim_model, num_tokens, l2norm_embed=l2norm_embed
         )
@@ -43,9 +47,14 @@ class SequenceModel(nn.Module):
         with torch.no_grad():
             self.to_embeddings.emb.weight.normal_(std=1e-4)
 
-    def forward(self, token_ids: torch.Tensor, return_final: bool = False):
+    def forward(
+        self,
+        token_ids: torch.Tensor,
+        return_final: bool = False,
+        last_token_only: bool = False,
+    ):
         token_embeddings = self.to_embeddings(token_ids)
-        attn_outs = self.attn_layer(token_embeddings)
+        attn_outs = self.attn_layer(token_embeddings, last_token_only)
 
         if self.attn_norm:
             attn_outs = self.norm(attn_outs)
@@ -112,16 +121,47 @@ class SingleHeadFixedAttention(nn.Module):
 
         return m
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, last_token_only: bool = False) -> torch.Tensor:
+        seq_len = x.shape[-2]
+
         if self.has_v:
             v = self.v_project(x)
         else:
             v = x
 
         m = self.get_mixing_matrix()
+
+        if last_token_only:
+            m = m[seq_len - 1 : seq_len, :seq_len]
+        else:
+            m = m[:seq_len, :seq_len]
+
         o = einsum(m, v, "t s, ... s p -> ... t p")
 
         if self.has_o:
             o = self.o_project(o)
 
         return o
+
+
+@torch.no_grad()
+def sample_from_model(
+    model: SequenceModel, batch_size: int, num_batches: int, seq_len: int
+):
+    """Samples trajectories from a SequenceModel"""
+
+    num_tokens = model.num_tokens
+    bos_token_id = num_tokens - 1
+
+    all_tokens = []
+    for batch_id in trange(num_batches):
+        tokens = torch.full((batch_size, seq_len + 1), bos_token_id, dtype=torch.int64)
+        for i in trange(seq_len):
+            logits = model(tokens[:, : (i + 1)], last_token_only=True)
+            logits = logits[:, -1, :-1]
+            next_tokens = Categorical(logits=logits).sample()
+            tokens[:, i + 1] = next_tokens
+
+        all_tokens.append(tokens[:, 1:])
+
+    return torch.cat(all_tokens, dim=0)
