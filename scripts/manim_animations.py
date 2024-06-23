@@ -7,6 +7,7 @@ import numpy as np
 import safetensors.numpy
 import safetensors.torch
 import torch
+from einops import rearrange
 from manim import (
     BLUE,
     DEGREES,
@@ -33,12 +34,15 @@ from manim import (
     Scene,
     ThreeDAxes,
     ThreeDScene,
+    TipableVMobject,
     Triangle,
     VGroup,
     VMobject,
     smooth,
 )
 
+from markov import HiddenMarkovModel, circle_matrices, messn_matrices, sample_hmm
+from markov.predict.numpy import get_optimal_beliefs
 from markov.sequence_model import SequenceModel, SingleHeadFixedAttention
 
 # manim -qh --renderer=opengl scripts/animations.py DemoScene
@@ -238,6 +242,96 @@ class Fractal(PMobject):
         self._update()
 
 
+class OptimalBeliefSimplex(PMobject):
+    def __init__(
+        self,
+        transition_matrix: np.ndarray,
+        emission_matrix: np.ndarray,
+        num_samples: int,
+        seq_len: int,
+        **kwargs
+    ):
+        self._transition_matrix = transition_matrix
+        self._emission_matrix = emission_matrix
+        self._num_samples = num_samples
+        self._seq_len = seq_len
+
+        super().__init__(color=WHITE, **kwargs)
+
+    def set_transition_matrix(self, transition_matrix: np.ndarray):
+        self._transition_matrix = transition_matrix
+        self._update()
+
+        return self
+
+    def set_emission_matrix(self, emission_matrix: np.ndarray):
+        self._emission_matrix = emission_matrix
+        self._update()
+
+        return self
+
+    def set_transition_matrix(self, transition_matrix: np.ndarray):
+        self._transition_matrix = transition_matrix
+        self._update()
+
+        return self
+
+    def set_transmission_and_emission_matrix(
+        self, transition_matrix: np.ndarray, emission_matrix: np.ndarray
+    ):
+        self._transition_matrix = transition_matrix
+        self._emission_matrix = emission_matrix
+        self._update()
+
+        return self
+
+    def _update(self):
+        hmm = HiddenMarkovModel(self._transition_matrix, self._emission_matrix)
+        rng = np.random.default_rng(1234)
+
+        states, outputs = sample_hmm(hmm, self._seq_len, self._num_samples, rng)
+        beliefs, probs, loss = get_optimal_beliefs(
+            outputs, self._transition_matrix, self._emission_matrix
+        )
+
+        # """
+        angles = np.arange(3) * 2 * np.pi / 3
+        vectors = np.stack(
+            [np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=0
+        )
+
+        self.points = (
+            vectors
+            @ rearrange(beliefs, "batch sequence belief -> belief (batch sequence)")
+        ).T
+        # """
+
+        # Normal Vector: 1, 1, 1
+        # Tangent Vector 1: -1, 1, 1
+        # Tangent Vector 2: 0, -2, 2
+        """
+        proj_matrix = np.asarray([[0, -2, 2], [-1, 1, 1]], dtype=np.float64)
+        proj_matrix /= np.linalg.norm(proj_matrix, ord=2, axis=1, keepdims=True)
+
+        self.points[:, :2] = (
+            proj_matrix
+            @ rearrange(beliefs, "batch sequence belief -> belief (batch sequence)")
+        ).T
+        self.points[:, 1] *= -1
+        """
+
+        self.points *= 2.5
+
+    def init_points(self):
+        self.reset_points()
+        self.generate_points()
+
+    def generate_points(self):
+        points = np.zeros((self._num_samples * self._seq_len, 3))
+        self.add_points(points)
+        self._update()
+
+
 class BeliefUpdatingScene(Scene):
     def construct(self):
         # axes = Axes()
@@ -278,26 +372,41 @@ class BeliefUpdatingScene(Scene):
         self.add(*vectors, fractal, simplex)
 
         # Animate single vector scaling and rotation
-        """
         self.play(vectors[0].animate.scale(0.25, about_point=ORIGIN))
+        self.pause(0.25)
         self.play(Rotating(vectors[0], about=ORIGIN, run_time=2.0, rate_func=smooth))
+        self.pause(0.25)
         self.play(vectors[0].animate.scale(1 / 0.25, about_point=ORIGIN))
+        self.pause(0.25)
 
         # Animate movement of all three vectors
         self.play(
-            vectors[0].animate.scale(0.25, about_point=ORIGIN).rotate_about_origin(TAU),
+            vectors[0]
+            .animate.scale(0.25, about_point=ORIGIN)
+            .rotate_about_origin(TAU * 0.1),
             vectors[1]
-            .animate.scale(0.5, about_point=ORIGIN)
+            .animate.scale(0.4, about_point=ORIGIN)
             .rotate_about_origin(TAU * 0.25),
             vectors[2]
-            .animate.scale(0.66, about_point=ORIGIN)
-            .rotate_about_origin(TAU * 0.5),
+            .animate.scale(0.55, about_point=ORIGIN)
+            .rotate_about_origin(TAU * -0.2),
         )
-        """
+        self.pause(0.25)
+
+        self.play(
+            *[
+                vectors[i].animate.put_start_and_end_on(
+                    ORIGIN, simplex.get_vertices()[i]
+                )
+                for i in range(3)
+            ]
+        )
+        self.pause(0.25)
 
         # Animate scale
         # self.play(fractal.animate.set_decay(0.1))
 
+        """
         scale = np.ones(depth)
         scale /= scale.sum()
         self.play(fractal.animate.set_scale(tuple(scale.tolist())))
@@ -305,3 +414,40 @@ class BeliefUpdatingScene(Scene):
         scale = np.asarray([0.9**i if i % 2 == 0 else 0.6**i for i in range(depth)])
         scale /= scale.sum()
         self.play(fractal.animate.set_scale(tuple(scale.tolist())))
+        """
+
+
+class OptimalBeliefScene(Scene):
+    def construct(self):
+        transition_matrix, emission_matrix = messn_matrices()
+        beliefs = OptimalBeliefSimplex(
+            transition_matrix,
+            emission_matrix,
+            num_samples=1024 * 16,
+            seq_len=64,
+            stroke_width=0.1,
+        )
+
+        angles = np.arange(3) * 2 * np.pi / 3
+        vectors = np.stack(
+            [np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=1
+        )
+        simplex_boundary = Polygon(*vectors, color=WHITE).scale(2.5)
+
+        self.add(beliefs, simplex_boundary)
+        self.play(
+            beliefs.animate.set_emission_matrix(messn_matrices(alpha=0.5)[1]),
+            run_time=2.5,
+        )
+        """
+        self.pause(0.5)
+        self.play(
+            beliefs.animate.set_transition_matrix(messn_matrices(x=0.001)[0]),
+            run_time=2.5,
+        )
+        self.pause(0.5)
+        self.play(
+            beliefs.animate.set_transmission_and_emission_matrix(*circle_matrices()),
+            run_time=2.5,
+        )
+        """
