@@ -1,7 +1,7 @@
 import json
 import os
 from functools import partial
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import safetensors.numpy
@@ -14,6 +14,7 @@ from manim import (
     GREEN,
     ORIGIN,
     RED,
+    TAU,
     WHITE,
     Arrow,
     Arrow3D,
@@ -21,6 +22,7 @@ from manim import (
     Circle,
     Create,
     DashedLine,
+    DiGraph,
     Dot,
     ManimColor,
     Mobject,
@@ -145,19 +147,34 @@ class BeliefSpaceScene(ThreeDScene):
 
 class Fractal(VGroup):
     def __init__(
-        self, vectors: np.ndarray, init_scale: float, scale: float, depth: int, **kwargs
+        self,
+        vectors: np.ndarray,
+        depth: int,
+        scale: float | Tuple[float, ...],
+        decay: float = 1.0,
+        show_all: bool = False,
+        **kwargs
     ):
         super().__init__(**kwargs)
 
         self._vectors = vectors
-        self._init_scale = init_scale
-        self._scale = scale
         self._depth = depth
+        self._scale = scale
+        self._decay = decay
+        self._show_all = show_all
 
         dots: List[Dot] = []
-        for i in range(3**depth):
-            dot = Dot(radius=0.01)
-            dots.append(dot)
+        if show_all:
+            for i in range(1, depth + 1):
+                for j in range(3**i):
+                    # color_interp = (depth - i) / (depth - 1)
+
+                    dot = Dot(radius=0.01, color=ManimColor.from_rgb((1.0, 1.0, 1.0)))
+                    dots.append(dot)
+        else:
+            for i in range(3**depth):
+                dot = Dot(radius=0.01)
+                dots.append(dot)
 
         self._dots = dots
         self.add(*dots)
@@ -170,18 +187,54 @@ class Fractal(VGroup):
 
         return self
 
+    def set_scale(self, scale: float | Tuple[float, ...]):
+        self._scale = scale
+        self._update()
+
+        return self
+
+    def set_decay(self, decay: float):
+        self._decay = decay
+        self._update()
+
+        return self
+
     def _update(self):
-        for i in range(3**self._depth):
-            pos = np.zeros(3)
-            dot_index = i
-            scale = self._init_scale
+        if isinstance(self._scale, float):
+            scale_list = (self._scale,) * self._depth
+        elif isinstance(self._scale, tuple):
+            scale_list = self._scale
+        else:
+            raise TypeError(self._scale)
 
-            for j in range(self._depth):
-                vec_index = dot_index % 3
-                dot_index //= 3
+        if self._show_all:
+            dot_index = 0
+            for i in range(1, self._depth + 1):
+                for j in range(3**i):
+                    pos = np.zeros(3)
+                    seq_index = j
 
-                pos += self._vectors[vec_index] * scale
-                scale *= self._scale
+                    for k in range(i):
+                        vec_index = seq_index % 3
+                        seq_index //= 3
+
+                        scale = scale_list[k] * self._decay**k
+                        pos += self._vectors[vec_index] * scale
+
+                    self._dots[dot_index].move_to(pos)
+                    dot_index += 1
+        else:
+            for i in range(3**self._depth):
+                pos = np.zeros(3)
+                seq_index = i
+
+                for j in range(self._depth):
+                    vec_index = seq_index % 3
+                    seq_index //= 3
+
+                    scale = scale_list[j] * self._decay**j
+                    pos += self._vectors[vec_index] * scale
+
                 self._dots[i].move_to(pos)
 
 
@@ -190,10 +243,10 @@ class BeliefUpdatingScene(Scene):
         # axes = Axes()
         # self.add(axes)
 
-        depth = 6
+        depth = 4
         colors = [RED, GREEN, BLUE]
 
-        simplex = Triangle(color=GRAY).scale(2.5)
+        simplex = Triangle(color=WHITE).scale(2.5)
         vectors: List[Arrow] = []
         for i in range(3):
             vector = Arrow(
@@ -206,30 +259,16 @@ class BeliefUpdatingScene(Scene):
             )
             vectors.append(vector)
 
-        """
-        def dot_updater(dot: Dot, i: int):
-            scale = 0.5
-            scale_mult = 0.5
-            pos = np.zeros(3)
-            for _ in range(depth):
-                vec_id = i % 3
-                i //= 3
+        scale = np.asarray([0.5**i for i in range(depth)])
+        scale /= scale.sum()
 
-                pos += vectors[vec_id].get_end() * scale
-                scale *= scale_mult
-
-            dot.move_to(pos)
-
-        dots = []
-        for i in range(3**depth):
-            dot = Dot(radius=0.01)
-            dot.add_updater(partial(dot_updater, i=i), call_updater=True)
-            dots.append(dot)
-
-        self.add(simplex, *vectors, *dots)
-        """
-
-        fractal = Fractal(np.asarray(simplex.get_vertices()), 0.5, 0.5, 6)
+        fractal = Fractal(
+            vectors=np.asarray(simplex.get_vertices()),
+            depth=depth,
+            scale=tuple(scale.tolist()),
+            decay=1.0,
+            show_all=True,
+        )
 
         def fractal_updater(fractal: Fractal):
             fractal.set_vectors(np.asarray([vec.get_end() for vec in vectors]))
@@ -238,6 +277,31 @@ class BeliefUpdatingScene(Scene):
 
         self.add(simplex, *vectors, fractal)
 
+        # Animate single vector scaling and rotation
+        """
         self.play(vectors[0].animate.scale(0.25, about_point=ORIGIN))
         self.play(Rotating(vectors[0], about=ORIGIN, run_time=2.0, rate_func=smooth))
         self.play(vectors[0].animate.scale(1 / 0.25, about_point=ORIGIN))
+
+        # Animate movement of all three vectors
+        self.play(
+            vectors[0].animate.scale(0.25, about_point=ORIGIN).rotate_about_origin(TAU),
+            vectors[1]
+            .animate.scale(0.5, about_point=ORIGIN)
+            .rotate_about_origin(TAU * 0.25),
+            vectors[2]
+            .animate.scale(0.66, about_point=ORIGIN)
+            .rotate_about_origin(TAU * 0.5),
+        )
+        """
+
+        # Animate scale
+        # self.play(fractal.animate.set_decay(0.1))
+
+        scale = np.ones(depth)
+        scale /= scale.sum()
+        self.play(fractal.animate.set_scale(tuple(scale.tolist())))
+
+        scale = np.asarray([0.9**i if i % 2 == 0 else 0.6**i for i in range(depth)])
+        scale /= scale.sum()
+        self.play(fractal.animate.set_scale(tuple(scale.tolist())))
