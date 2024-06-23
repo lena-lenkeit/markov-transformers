@@ -1,5 +1,7 @@
+from typing import Tuple
+
 import numpy as np
-from einops import einsum
+from einops import einsum, rearrange, repeat
 from jaxtyping import Float, Int
 
 
@@ -44,3 +46,45 @@ def get_stationary_distribution(
     prior = one_vector / np.sum(one_vector)
 
     return prior
+
+
+def nll_loss(input, target):
+    # TODO: Fix this
+    return -np.mean(np.log(input[np.arange(len(target)), target]))
+
+
+def get_optimal_beliefs(
+    observations: Int[np.ndarray, "batch sequence"],
+    transition_matrix: Float[np.ndarray, "state next_state"],
+    emission_matrix: Float[np.ndarray, "state emission"],
+):
+    dim_batch, dim_sequence = observations.shape
+
+    # Get initial state
+    prior = get_stationary_distribution(transition_matrix)
+    belief_state = repeat(prior, "states -> batch states", batch=dim_batch)
+    probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
+
+    seq_beliefs = [belief_state]
+    seq_probs = [probs]
+    for j in range(dim_sequence - 1):
+        tokens = observations[:, j]
+
+        belief_state = update_posterior(belief_state, tokens, emission_matrix)
+        belief_state = propagate_values(belief_state, transition_matrix, normalize=True)
+
+        probs = einsum(belief_state, emission_matrix, "... i, i j -> ... j")
+
+        seq_beliefs.append(belief_state)
+        seq_probs.append(probs)
+
+    seq_beliefs = np.stack(seq_beliefs, axis=1)
+    seq_probs = np.stack(seq_probs, axis=1)
+
+    seq_log_probs = np.log(seq_probs)
+    loss = nll_loss(
+        rearrange(seq_log_probs, "batch sequence logits -> (batch sequence) logits"),
+        rearrange(observations, "batch sequence -> (batch sequence)"),
+    )
+
+    return seq_beliefs, seq_probs, loss
