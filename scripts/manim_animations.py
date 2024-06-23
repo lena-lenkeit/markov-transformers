@@ -26,6 +26,8 @@ from manim import (
     Dot,
     ManimColor,
     Mobject,
+    PMobject,
+    PointCloudDot,
     Polygon,
     Rotating,
     Scene,
@@ -145,7 +147,7 @@ class BeliefSpaceScene(ThreeDScene):
         self.wait(duration=5)
 
 
-class Fractal(VGroup):
+class Fractal(PMobject):
     def __init__(
         self,
         vectors: np.ndarray,
@@ -155,31 +157,13 @@ class Fractal(VGroup):
         show_all: bool = False,
         **kwargs
     ):
-        super().__init__(**kwargs)
-
         self._vectors = vectors
         self._depth = depth
         self._scale = scale
         self._decay = decay
         self._show_all = show_all
 
-        dots: List[Dot] = []
-        if show_all:
-            for i in range(1, depth + 1):
-                for j in range(3**i):
-                    # color_interp = (depth - i) / (depth - 1)
-
-                    dot = Dot(radius=0.01, color=ManimColor.from_rgb((1.0, 1.0, 1.0)))
-                    dots.append(dot)
-        else:
-            for i in range(3**depth):
-                dot = Dot(radius=0.01)
-                dots.append(dot)
-
-        self._dots = dots
-        self.add(*dots)
-
-        self._update()
+        super().__init__(color=WHITE, **kwargs)
 
     def set_vectors(self, vectors: np.ndarray):
         self._vectors = vectors
@@ -221,7 +205,7 @@ class Fractal(VGroup):
                         scale = scale_list[k] * self._decay**k
                         pos += self._vectors[vec_index] * scale
 
-                    self._dots[dot_index].move_to(pos)
+                    self.points[dot_index] = pos
                     dot_index += 1
         else:
             for i in range(3**self._depth):
@@ -235,7 +219,23 @@ class Fractal(VGroup):
                     scale = scale_list[j] * self._decay**j
                     pos += self._vectors[vec_index] * scale
 
-                self._dots[i].move_to(pos)
+                self.points[i] = pos
+
+    def init_points(self):
+        self.reset_points()
+        self.generate_points()
+
+    def generate_points(self):
+        if self._show_all:
+            num_points = 0
+            for i in range(self._depth):
+                num_points += 3 ** (i + 1)
+        else:
+            num_points = 3**self._depth
+
+        points = np.zeros((num_points, 3))
+        self.add_points(points)
+        self._update()
 
 
 class BeliefUpdatingScene(Scene):
@@ -243,7 +243,7 @@ class BeliefUpdatingScene(Scene):
         # axes = Axes()
         # self.add(axes)
 
-        depth = 4
+        depth = 7
         colors = [RED, GREEN, BLUE]
 
         simplex = Triangle(color=WHITE).scale(2.5)
@@ -275,7 +275,7 @@ class BeliefUpdatingScene(Scene):
 
         fractal.add_updater(fractal_updater, call_updater=True)
 
-        self.add(simplex, *vectors, fractal)
+        self.add(*vectors, fractal, simplex)
 
         # Animate single vector scaling and rotation
         """
