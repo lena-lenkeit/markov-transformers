@@ -266,21 +266,19 @@ class OptimalBeliefSimplex(PMobject):
 
         super().__init__(color=WHITE, **kwargs)
 
+        points, rgbas = self._get_point_data()
+        self.set_points(points)
+        self.set_rgba_array_direct(rgbas)
+
     def set_transition_matrix(self, transition_matrix: np.ndarray):
         self._transition_matrix = transition_matrix
-        self._update()
+        self.init_points()
 
         return self
 
     def set_emission_matrix(self, emission_matrix: np.ndarray):
         self._emission_matrix = emission_matrix
-        self._update()
-
-        return self
-
-    def set_transition_matrix(self, transition_matrix: np.ndarray):
-        self._transition_matrix = transition_matrix
-        self._update()
+        self.init_points()
 
         return self
 
@@ -289,11 +287,11 @@ class OptimalBeliefSimplex(PMobject):
     ):
         self._transition_matrix = transition_matrix
         self._emission_matrix = emission_matrix
-        self._update()
+        self.init_points()
 
         return self
 
-    def _update(self):
+    def _get_point_data(self):
         hmm = HiddenMarkovModel(self._transition_matrix, self._emission_matrix)
         rng = np.random.default_rng(1234)
 
@@ -302,52 +300,29 @@ class OptimalBeliefSimplex(PMobject):
             outputs, self._transition_matrix, self._emission_matrix
         )
 
-        """
-        angles = np.arange(3) * 2 * np.pi / 3
-        vectors = np.stack(
-            [np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=0
-        )
-
-        self.points = (
-            vectors
-            @ rearrange(beliefs, "batch sequence belief -> belief (batch sequence)")
-        ).T
-        """
-
         # To simplex
-        self.points[:, :2] = ternary_to_cartesian(
+        points = ternary_to_cartesian(
             rearrange(beliefs, "batch sequence belief -> (batch sequence) belief")
         )
 
         # Center
         center = ternary_to_cartesian(np.ones(3) / np.linalg.norm(np.ones(3)))
-        self.points[:, :2] -= center[None]
-
-        # Normal Vector: 1, 1, 1
-        # Tangent Vector 1: -1, 1, 1
-        # Tangent Vector 2: 0, -2, 2
-        """
-        proj_matrix = np.asarray([[0, -2, 2], [-1, 1, 1]], dtype=np.float64)
-        proj_matrix /= np.linalg.norm(proj_matrix, ord=2, axis=1, keepdims=True)
-
-        self.points[:, :2] = (
-            proj_matrix
-            @ rearrange(beliefs, "batch sequence belief -> belief (batch sequence)")
-        ).T
-        self.points[:, 1] *= -1
-        """
+        points -= center[None]
 
         # Scale
-        self.points *= 2.5
+        points *= 7.5
 
-    def init_points(self):
-        self.reset_points()
-        self.generate_points()
+        # Add Z
+        points = np.concatenate((points, np.zeros_like(points[..., :1])), axis=-1)
 
-    def generate_points(self):
-        points = np.zeros((self._num_samples * self._seq_len, 3))
-        self.add_points(points)
-        self._update()
+        # Colors
+        red = color_to_rgba(RED)
+        green = color_to_rgba(GREEN)
+        blue = color_to_rgba(BLUE)
+        colors = np.stack((red, green, blue), axis=0)
+        rgbas = colors[outputs.flatten()]
+
+        return points, rgbas
 
 
 class BeliefUpdatingScene(Scene):
