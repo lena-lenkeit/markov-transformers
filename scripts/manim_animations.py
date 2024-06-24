@@ -24,6 +24,9 @@ from manim import (
     Circle,
     Create,
     DashedLine,
+    DecimalMatrix,
+    DecimalNumber,
+    DecimalTable,
     DiGraph,
     Dot,
     ManimColor,
@@ -33,12 +36,16 @@ from manim import (
     Polygon,
     Rotating,
     Scene,
+    Text,
     ThreeDAxes,
     ThreeDScene,
     TipableVMobject,
     Triangle,
+    ValueTracker,
     VGroup,
     VMobject,
+    always_redraw,
+    color_to_rgba,
     smooth,
 )
 
@@ -250,6 +257,26 @@ def ternary_to_cartesian(t: Float[np.ndarray, "... 3"]) -> Float[np.ndarray, "..
     return np.stack((x, y), axis=-1)
 
 
+class MatrixValueTracker(ValueTracker):
+    def __init__(self, value: np.ndarray = np.zeros((1, 1)), **kwargs):
+        super().__init__(**kwargs)
+
+        self.set(points=value.flatten()[..., None].repeat(3, axis=-1))
+        self.set_value(value)
+
+    def get_value(self):
+        return self.points[..., 0].reshape(self._shape)
+
+    def set_value(self, value: np.ndarray):
+        if isinstance(value, int):
+            return
+
+        self._shape = value.shape
+        self.points = value.flatten()[..., None].repeat(3, axis=-1)
+
+        return self
+
+
 class OptimalBeliefSimplex(PMobject):
     def __init__(
         self,
@@ -412,13 +439,17 @@ class BeliefUpdatingScene(Scene):
 
 class OptimalBeliefScene(Scene):
     def construct(self):
-        transition_matrix, emission_matrix = messn_matrices()
-        beliefs = OptimalBeliefSimplex(
-            transition_matrix,
-            emission_matrix,
-            num_samples=1024 * 16,
-            seq_len=64,
-            stroke_width=0.1,
+        transition_matrix = MatrixValueTracker(messn_matrices()[0])
+        emission_matrix = MatrixValueTracker(messn_matrices()[1])
+
+        beliefs = always_redraw(
+            lambda: OptimalBeliefSimplex(
+                transition_matrix.get_value(),
+                emission_matrix.get_value(),
+                num_samples=1024 * 16,
+                seq_len=64,
+                stroke_width=0.1,
+            )
         )
 
         """
@@ -433,24 +464,44 @@ class OptimalBeliefScene(Scene):
 
         edges = np.concatenate((edges, np.zeros_like(edges[:, :1])), axis=-1)
         center = np.concatenate((center, np.zeros_like(center[:1])), axis=-1)
-        vertices = (edges - center[None]) * 2.5
+        vertices = (edges - center[None]) * 7.5
 
         simplex_boundary = Polygon(*vertices, color=WHITE)
 
         self.add(beliefs, simplex_boundary)
+
+        """
+        matrix_display = DecimalNumber(transition_matrix[0, 0])
+
+        def matrix_updater(matrix: DecimalNumber):
+            print(beliefs._transition_matrix[0, 0])  # Doesn't update here
+            matrix.become(DecimalNumber(beliefs._transition_matrix[0, 0]))
+
+        matrix_display.add_updater(matrix_updater, call_updater=True)
+        self.add(matrix_display)
+        """
+
         self.play(
-            beliefs.animate.set_emission_matrix(messn_matrices(alpha=0.5)[1]),
+            emission_matrix.animate.set_value(messn_matrices(alpha=0.5)[1]),
             run_time=2.5,
         )
         # """
         self.pause(0.5)
         self.play(
-            beliefs.animate.set_transition_matrix(messn_matrices(x=0.001)[0]),
+            transition_matrix.animate.set_value(messn_matrices(x=0.001)[0]),
             run_time=2.5,
         )
         self.pause(0.5)
         self.play(
-            beliefs.animate.set_transmission_and_emission_matrix(*circle_matrices()),
+            transition_matrix.animate.set_value(circle_matrices()[0]),
+            emission_matrix.animate.set_value(circle_matrices()[1]),
             run_time=2.5,
         )
+        self.pause(0.5)
+        self.play(
+            transition_matrix.animate.set_value(messn_matrices()[0]),
+            emission_matrix.animate.set_value(messn_matrices()[1]),
+            run_time=2.5,
+        )
+        self.pause(0.5)
         # """
