@@ -8,6 +8,7 @@ import safetensors.numpy
 import safetensors.torch
 import torch
 from einops import rearrange
+from jaxtyping import Float
 from manim import (
     BLUE,
     DEGREES,
@@ -242,6 +243,13 @@ class Fractal(PMobject):
         self._update()
 
 
+def ternary_to_cartesian(t: Float[np.ndarray, "... 3"]) -> Float[np.ndarray, "... 2"]:
+    x = 1 / 2 * (2 * t[..., 1] + t[..., 2]) / (t[..., 0] + t[..., 1] + t[..., 2])
+    y = np.sqrt(3) / 2 * t[..., 2] / (t[..., 0] + t[..., 1] + t[..., 2])
+
+    return np.stack((x, y), axis=-1)
+
+
 class OptimalBeliefSimplex(PMobject):
     def __init__(
         self,
@@ -294,7 +302,7 @@ class OptimalBeliefSimplex(PMobject):
             outputs, self._transition_matrix, self._emission_matrix
         )
 
-        # """
+        """
         angles = np.arange(3) * 2 * np.pi / 3
         vectors = np.stack(
             [np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=0
@@ -304,7 +312,16 @@ class OptimalBeliefSimplex(PMobject):
             vectors
             @ rearrange(beliefs, "batch sequence belief -> belief (batch sequence)")
         ).T
-        # """
+        """
+
+        # To simplex
+        self.points[:, :2] = ternary_to_cartesian(
+            rearrange(beliefs, "batch sequence belief -> (batch sequence) belief")
+        )
+
+        # Center
+        center = ternary_to_cartesian(np.ones(3) / np.linalg.norm(np.ones(3)))
+        self.points[:, :2] -= center[None]
 
         # Normal Vector: 1, 1, 1
         # Tangent Vector 1: -1, 1, 1
@@ -320,6 +337,7 @@ class OptimalBeliefSimplex(PMobject):
         self.points[:, 1] *= -1
         """
 
+        # Scale
         self.points *= 2.5
 
     def init_points(self):
@@ -428,18 +446,28 @@ class OptimalBeliefScene(Scene):
             stroke_width=0.1,
         )
 
+        """
         angles = np.arange(3) * 2 * np.pi / 3
         vectors = np.stack(
             [np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=1
         )
-        simplex_boundary = Polygon(*vectors, color=WHITE).scale(2.5)
+        """
+
+        edges = ternary_to_cartesian(np.eye(3))
+        center = ternary_to_cartesian(np.ones(3) / np.linalg.norm(np.ones(3)))
+
+        edges = np.concatenate((edges, np.zeros_like(edges[:, :1])), axis=-1)
+        center = np.concatenate((center, np.zeros_like(center[:1])), axis=-1)
+        vertices = (edges - center[None]) * 2.5
+
+        simplex_boundary = Polygon(*vertices, color=WHITE)
 
         self.add(beliefs, simplex_boundary)
         self.play(
             beliefs.animate.set_emission_matrix(messn_matrices(alpha=0.5)[1]),
             run_time=2.5,
         )
-        """
+        # """
         self.pause(0.5)
         self.play(
             beliefs.animate.set_transition_matrix(messn_matrices(x=0.001)[0]),
@@ -450,4 +478,4 @@ class OptimalBeliefScene(Scene):
             beliefs.animate.set_transmission_and_emission_matrix(*circle_matrices()),
             run_time=2.5,
         )
-        """
+        # """
