@@ -293,19 +293,17 @@ class OptimalBeliefSimplex(PMobject):
 
         super().__init__(color=WHITE, **kwargs)
 
-        points, rgbas = self._get_point_data()
-        self.set_points(points)
-        self.set_rgba_array_direct(rgbas)
+        self._custom_init_points()
 
     def set_transition_matrix(self, transition_matrix: np.ndarray):
         self._transition_matrix = transition_matrix
-        self.init_points()
+        self._custom_init_points()
 
         return self
 
     def set_emission_matrix(self, emission_matrix: np.ndarray):
         self._emission_matrix = emission_matrix
-        self.init_points()
+        self._custom_init_points()
 
         return self
 
@@ -314,7 +312,7 @@ class OptimalBeliefSimplex(PMobject):
     ):
         self._transition_matrix = transition_matrix
         self._emission_matrix = emission_matrix
-        self.init_points()
+        self._custom_init_points()
 
         return self
 
@@ -350,6 +348,11 @@ class OptimalBeliefSimplex(PMobject):
         rgbas = colors[outputs.flatten()]
 
         return points, rgbas
+
+    def _custom_init_points(self):
+        points, rgbas = self._get_point_data()
+        self.set_points(points)
+        self.set_rgba_array_direct(rgbas)
 
 
 class BeliefUpdatingScene(Scene):
