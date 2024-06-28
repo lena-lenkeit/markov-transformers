@@ -17,6 +17,70 @@ class NormLayer(nn.Module):
         return F.normalize(x, p=self.p, dim=-1) * self.scale
 
 
+class LinearSequenceModel(nn.Module):
+    """A linear (causal) map directly between tokens and logits. Expands the token
+    indices to a sequence of one-hot vectors, and directly maps these to the logits."""
+
+    def __init__(
+        self, num_tokens: int, max_seq_len: int, causal: bool = True, bias: bool = False
+    ):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.max_seq_len = max_seq_len
+        self.causal = causal
+
+        # Create a weight matrix for the linear mapping
+        self.weight = nn.Parameter(
+            torch.randn(num_tokens * max_seq_len, num_tokens * max_seq_len) * 1e-4
+        )
+
+        self.bias = None
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(num_tokens * max_seq_len))
+
+        # If causal, create a causal mask
+        if causal:
+            mask = torch.tril(torch.ones(max_seq_len, max_seq_len))
+            mask = mask.repeat_interleave(num_tokens, dim=0)
+            mask = mask.repeat_interleave(num_tokens, dim=1)
+            self.register_buffer("mask", mask, persistent=False)
+
+    def get_masked_weight(self, seq_len: int | None = None) -> torch.Tensor:
+        # Apply causal mask if needed
+        if seq_len is None:
+            seq_len = self.max_seq_len
+
+        if self.causal:
+            masked_weight = (
+                self.weight
+                * self.mask[: seq_len * self.num_tokens, : seq_len * self.num_tokens]
+            )
+        else:
+            masked_weight = self.weight
+
+        return masked_weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len = x.shape
+
+        # Convert input tokens to one-hot vectors
+        one_hot = F.one_hot(x, num_classes=self.num_tokens).float()
+
+        # Reshape the one-hot vectors
+        one_hot_flat = one_hot.view(batch_size, -1)
+
+        # Apply causal mask if needed
+        masked_weight = self.get_masked_weight(seq_len)
+
+        # Apply the linear transformation
+        logits = F.linear(one_hot_flat, masked_weight, self.bias)
+
+        # Reshape logits to (batch_size, seq_len, num_tokens)
+        logits = logits.view(batch_size, seq_len, self.num_tokens)
+
+        return logits
+
+
 class SequenceModel(nn.Module):
     def __init__(
         self,
